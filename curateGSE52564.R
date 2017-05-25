@@ -40,7 +40,7 @@ pheno.data = pData(geo.gse[[1]]) %>%
 # Get supplementary files from GEO
 tmp = synQuery('select * from file where parentId == "syn9796071"')
 ind = grep('.xls', tmp$file.name)
-counts = lapply(tmp$file.id[ind], function(id){
+fpkm = lapply(tmp$file.id[ind], function(id){
   obj = synGet(id)
   dat = read.xlsx(obj@filePath, 1)
   colnames(dat) = c('Gene.Names',paste(str_split(obj$properties$name,'')[[1]][1:10], collapse = ''))
@@ -54,33 +54,27 @@ covariates = pheno.data[,c('Tissue', 'CellType')]
 covariates = as.data.frame(lapply(covariates, factor))
 rownames(covariates) = pheno.data$GSE
 
-# Convert counts to cpm
-expr = counts[,-(1)]
-rownames(expr) = counts$Gene.Names
-expr = voom(expr, normalize.method = 'quantile', plot = T)$E
-
-ind = intersect(rownames(covariates), colnames(expr))
-expr = expr[,ind]
-covariates = covariates[ind,]
-
 # Write files to synapse
-expr %>%
+rownames(fpkm) = toupper(fpkm$Gene.Names)
+fpkm$Gene.Names = NULL
+lfpkm = log2(fpkm)
+lfpkm %>%
   rownameToFirstColumn('hgnc_symbol') %>%
-  write.table(file = 'LogCPM.tsv', sep = '\t', quote = F, row.names = F)
-expr.obj = File('LogCPM.tsv', parentId = 'syn9796071', name = 'Expression (Log CPM)')
+  write.table(file = 'lfpkm.tsv', sep = '\t', quote = F, row.names = F)
+expr.obj = File('lfpkm.tsv', parentId = 'syn9796071', name = 'Expression (Log FPKM)')
 expr.obj = synStore(expr.obj, 
                     activityName = 'Curate GEO data', 
-                    used = 'https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE+52564',
+                    used = 'https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE+73721',
                     executed = thisFile)
 
-counts %>%
-  dplyr::rename(hgnc_symbol = Gene.Names) %>%
-  write.table(file = 'Counts.tsv', sep = '\t', quote = F, row.names = F)
-counts.obj = File('Counts.tsv', parentId = 'syn9796071', name = 'Expression (Raw counts)')
-counts.obj = synStore(counts.obj, 
-                      activityName = 'Curate GEO data', 
-                      used = 'https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE+52564',
-                      executed = thisFile)
+fpkm %>%
+  rownameToFirstColumn('hgnc_symbol') %>%
+  write.table(file = 'fpkm.tsv', sep = '\t', quote = F, row.names = F)
+expr.obj = File('fpkm.tsv', parentId = 'syn9796071', name = 'Expression (FPKM)')
+expr.obj = synStore(expr.obj, 
+                    activityName = 'Curate GEO data', 
+                    used = 'https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE+73721',
+                    executed = thisFile)
 
 covariates %>%
   rownameToFirstColumn('SampleID') %>%
