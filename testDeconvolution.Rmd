@@ -1,0 +1,407 @@
+---
+title: "Test cell type deconvolution method"
+author: "Thanneer Perumal"
+date: "`r date()`"
+output: html_document
+---
+```{r knit2synapse, eval=FALSE}
+library(synapseClient)
+library(knit2synapse)
+
+synapseLogin()
+
+knit2synapse::knitToFolderEntity(file = "./testDeconvolution.Rmd",
+                                 parentId = "syn9890608",
+                                 entityName = "Test Deconvolution Methods")
+```
+
+```{r libs, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE, cache=FALSE}
+## It is assumed your working directory is where this file
+
+## Load required libraries
+library(CovariateAnalysis) # get it from devtools::install_github('th1vairam/CovariateAnalysis@dev')
+library(data.table)
+library(tidyr)
+library(plyr)
+library(dplyr)
+
+library(synapseClient)
+library(knitr)
+library(githubr)
+
+library(ggplot2)
+library(xlsx)
+
+library(doParallel)
+library(foreach)
+
+cl = makeCluster(detectCores() - 2)
+registerDoParallel(cl)
+
+synapseLogin()
+
+# Source external files
+source('./DSA.R')
+
+options(xtable.type="html")
+
+knitr::opts_chunk$set(
+  echo=FALSE,
+  warning=FALSE,
+  message=FALSE,
+  error = FALSE,
+  tidy = FALSE,
+  cache = TRUE)
+```
+
+```{r synapse.parameters, include=FALSE, cache=TRUE}
+# Synapse parameters
+parentId = 'syn9890608';
+activityName = 'Test cell type deconvolution methods';
+
+thisFileName <- 'testDeconvolution.Rmd'
+
+# Github link
+thisRepo <- getRepo(repository = "th1vairam/CelltypeDeconvolution", ref="branch", refName='deconvolute')
+thisFile <- getPermlink(repository = thisRepo, repositoryPath=thisFileName)
+```
+### Data download
+Obtain log cpm or log fpkm and covariates from synapse.
+```{r download.data, cache=TRUE}
+# Get expression matrix
+expr.ids = c(GSE67835 = 'syn9786960', GSE52564 = 'syn9890529', GSE73721 = 'syn9890519')
+expr = lapply(expr.ids, downloadFile)
+all.used.ids = expr.ids
+expr = join_all(expr, type = 'inner')
+
+# Get covariates matrix
+covariates.ids = c(GSE67835 = 'syn9786959', GSE52564 = 'syn9890087', GSE73721 = 'syn9890517')
+covariates = lapply(covariates.ids, downloadFile)
+all.used.ids = c(all.used.ids, covariates.ids)
+
+# Format covariates
+covariates[[1]]$Age = gsub(' years', '', covariates[[1]]$Age) %>%
+  gsub('postnatal ', '', .) %>%
+  as.numeric()
+
+colnames(covariates[[3]]) = c('SampleID', 'Age', 'Tissue', 'CellType')
+covariates = covariates %>%
+  rbindlist(use.names = T, fill = T, idcol = 'Study') %>%
+  dplyr::select(SampleID, Study, Tissue, CellType)
+```
+
+```{r exp.plts}
+# Exploratory plots
+pl = dlply(covariates, .(Study), .fun = function(cov, expr){
+  x = expr[,cov$SampleID]
+  rownames(x) = x$hgnc_symbol
+  
+  PC = prcomp(x, scale. = T, center = T)
+  
+  tmp = data.frame(SampleID = rownames(PC$rotation),
+                   PC1 = PC$rotation[,1],
+                   PC2 = PC$rotation[,2]) %>%
+    left_join(cov)
+  
+  p = ggplot(tmp, aes(x = PC1, y = PC2, color = CellType)) + geom_point()
+}, expr)
+multiplot(plotlist = pl, cols = 3)
+
+kable(table(covariates$Study, covariates$CellType))
+
+# Overall PC
+pcplot <- function(x, cov, plotName, rank){
+  if (rank == T)
+    x = apply(x, 2, rank)
+  
+  PC = prcomp(x, scale. = T, center = T)
+  tmp = data.frame(SampleID = rownames(PC$rotation),
+                   PC1 = PC$rotation[,1],
+                   PC2 = PC$rotation[,2]) %>%
+    left_join(cov)
+  
+  p = ggplot(tmp, aes(x = PC1, y = PC2, color = Study, shape = CellType)) + geom_point() + ggtitle(plotName) 
+  p = p + scale_shape_manual(values = 1:7)
+  return(p)
+}
+
+x = expr[,covariates$SampleID]
+rownames(x) = x$hgnc_symbol
+pl = list()
+pl[[1]] = pcplot(x, covariates, 'All Genes', rank = F)
+pl[[2]] = pcplot(x, covariates, 'All Genes (Ranked)', rank = T)
+multiplot(plotlist = pl, cols = 2)
+
+# Overall distribution
+distPlot <- function(x, cov, plotName, rank){
+  if(rank == T)
+    x[,-(1)] = lapply(x[-(1)],rank)
+  
+  tmp1 = tidyr::gather(x, SampleID, value, -hgnc_symbol) %>%
+    left_join(cov)
+  p = ggplot(tmp1, aes(x = value, color = SampleID)) + facet_grid(Study~.)+theme(legend.position = 'NONE') + geom_density()
+  p = p + ggtitle(plotName)
+  
+  return(p)
+}
+pl[[1]] = distPlot(expr, covariates, 'All Genes', rank = F)
+pl[[2]] = distPlot(expr, covariates, 'All Genes (Ranked)', rank = T)
+multiplot(plotlist = pl, cols = 2)
+```
+
+### Get gene signatures
+```{r gene.sig}
+# From mariet
+load(synGet('syn9818080')@filePath)
+all.used.ids = c(all.used.ids, 'syn9818080')
+
+gene.markers = Reduce(c, CellTypeList) %>%
+  unique()
+
+# Overall PC
+x = expr[expr$hgnc_symbol %in% gene.markers, covariates$SampleID]
+rownames(x) = x$hgnc_symbol
+pl = list()
+pl[[1]] = pcplot(x, covariates, 'All Genes', rank = F)
+pl[[2]] = pcplot(x, covariates, 'All Genes (Ranked)', rank = T)
+multiplot(plotlist = pl, cols = 2)
+
+# Overall distribution
+pl[[1]] = distPlot(expr[expr$hgnc_symbol %in% gene.markers, ], covariates, 'All Genes', rank = F)
+pl[[2]] = distPlot(expr[expr$hgnc_symbol %in% gene.markers, ], covariates, 'All Genes (Ranked)', rank = T)
+multiplot(plotlist = pl, cols = 2)
+
+# Raw differential expression from mariet
+obj = synGet('syn9796122')
+FC = lapply(1:5, function(i) {
+  read.xlsx(obj@filePath, i) %>%
+    dplyr::select(Gene, contains('FC.')) %>%
+    tidyr::gather(FC, value, -Gene) %>%
+    dplyr::group_by(Gene) %>%
+    dplyr::summarise(FC.sum = (sum(value))) %>%
+    dplyr::arrange(desc(FC.sum))
+})
+names(FC) = c('neurons', 'astrocytes', 'microglia', 'oligodendrocytes', 'endothelial')
+```
+
+### Perform differential expression (to choose signatures)
+```{r diff.exp, eval = F}
+X = expr[,-(1)]
+rownames(X) = expr$hgnc_symbol
+expr$hgnc_symbol = NULL
+
+covariates$Study = as.factor(covariates$Study)
+covariates$Tissue = as.factor(covariates$Tissue)
+covariates$CellType = as.factor(covariates$CellType)
+
+design = getDesignMatrix(covariates[,c('Tissue','CellType')], Intercept = T)$design
+colnames(design)[1] = 'Intercept'
+fit.cor = duplicateCorrelation(X, design = design, block = covariates$Study)
+fit = lmFit(X, design = design, block = covariates$Study, correlation = fit.cor$consensus.correlation)
+
+contrasts = makeContrasts(c('Intercept-(CellTypeendothelial + CellTypemicroglia + CellTypemyeloid + 
+                            CellTypeneurons + CellTypeoligodendrocytes + CellTypeOPC)/6'),
+                          levels = colnames(fit$coefficients))
+fit.contr = contrasts.fit(fit, contrasts)
+fit.contr = eBayes(fit.contr)
+fit = eBayes(fit)
+
+diff.exp = lapply(5:10, function(i){
+  tmp = topTable(fit, coef = i, number = 50000, confint = T)
+  tmp$hgnc_symbol = rownames(tmp)
+  return(tmp)
+})
+names(diff.exp) = gsub('CellType', '', colnames(design)[5:10])
+
+diff.exp$astrocytes = topTable(fit.contr, coef = 1, number = 50000, confint = T)
+diff.exp$astrocytes$hgnc_symbol = rownames(diff.exp$astrocytes)
+
+diff.exp = plyr::ldply(diff.exp, .fun = function(x){
+  x$rank = rank(-log10(x$adj.P.Val) + x$logFC)
+  return(x)
+}, .id = 'CellType')
+```
+
+### Naive CIBERSORT
+```{r cibersort, fig.height=10, fig.width=10}
+cb.results = list()
+for (ngenes in 1:4){
+  gl = plyr::llply(FC, .fun = function(x){
+    top_n(x, c(50,100,200,500)[ngenes]) %>%
+      dplyr::select(Gene) %>%
+      unlist %>%
+      as.character()
+  }) %>%
+    Reduce(c,.) %>% 
+    unique()
+
+  all.results = list()
+  for(study in unique(covariates$Study)){
+  cov = dplyr::filter(covariates, Study == study) %>%
+    droplevels %>% data.frame()
+  rownames(cov) = cov$SampleID
+  
+  exp = data.matrix(expr[,-(1)])
+  rownames(exp) = expr[,1]
+  
+  exp.r = exp[rownames(exp) %in% gl,  cov$SampleID]
+  exp.r.sum = dlply(cov, .(CellType), .fun = function(x, exp.r){
+    tmp = data.frame(V1 = apply(exp.r[, x$SampleID,drop=F],1,mean))
+    rownames(tmp) = rownames(exp.r)
+    colnames(tmp) = unique(x$CellType)
+    return(tmp)
+  }, exp.r) %>%
+    do.call(cbind,.)
+
+  exp.m = exp[rownames(exp) %in% gl,  covariates$SampleID]
+  
+  all.results[[study]] = plyr::ldply(1:dim(exp.m)[2], .fun = function(i, X, Y){
+    # Core algorithm
+    modCIBERSORT <- function(X, y){
+      # try different values of nu
+      allModels = lapply(c(0.25,0.5,0.75), function(nus){
+        model <- svm(X,y,type="nu-regression",kernel="linear",nu=nus,scale=F)
+        
+        weights = t(model$coefs) %*% model$SV
+        weights[which(weights<0)] = 0
+        w = weights/sum(weights)
+        
+        u <- sweep(X,MARGIN=2,w,'*')
+        k <- apply(u, 1, sum)
+        nusvm <- sqrt((mean((k - y)^2)))
+        corrv <- cor(k, y)
+        
+        return(list(model = model, w = w, k = k, nusvm = nusvm, corrv = corrv))
+      })
+      
+      # pick best model
+      ind <- which.min(sapply(allModels, function(x){x$nusvm}))
+      
+      # get and normalize coefficients
+      w <- allModels[[ind]]$w
+      rmse <- allModels[[ind]]$nusvm
+      corr <- allModels[[ind]]$corrv
+      
+      # do permutation
+      nus = switch(ind, '1' = c(0.25), '2' = c(0.5), '3' = c(0.75))
+      wperm = plyr::ldply(1:100, .fun = function(i, X, y, nus){
+        yperm = y[sample(1:dim(y)[1], dim(y)[1]),1,drop=FALSE]
+        rownames(yperm) = rownames(y)
+        model <- svm(X,yperm,type="nu-regression",kernel="linear",nu=nus,scale=F)
+        weights = t(model$coefs) %*% model$SV
+        weights[which(weights<0)] = 0
+        w = weights/sum(weights)
+      }, X, y, nus)
+      pval = sapply(colnames(wperm), function(colName){
+        sum(wperm[,colName] >= w[1,colName], na.rm = T)/100
+      })  
+      w[pval<=0.05] = 0
+      return(list("w" = w, "mix_rmse" = rmse, "mix_r" = corr))
+    }
+    
+    model = modCIBERSORT(X, Y[,i,drop=FALSE])
+    model$w[model$pval>=0.05] = 0
+    cbind(data.frame(SampleID = colnames(Y)[i]),
+          model$w, 
+          data.frame(rmse = model$mix_rmse, 
+                     r = as.numeric(model$mix_r)))
+  }, exp.r.sum, exp.m, .parallel = T,
+  .paropts = list(.packages = c('e1071'))) %>%
+    dplyr::mutate(refSet = study) %>%
+    dplyr::left_join(covariates)
+}
+
+  all.results = rbindlist(all.results, use.names = T, fill = T) %>%
+    tidyr::gather(celltype, value, -SampleID, -rmse, -r, -refSet, -Study, -Tissue, -CellType) %>%
+    plyr::ddply(.(SampleID, refSet), .fun = function(x){
+      x$refFraction = 0
+      x$refFraction[x$CellType == x$celltype] = 1
+      return(x)
+    })
+
+  p = ggplot(tmp, aes(x = CellType, y = value, color = Study)) + geom_boxplot() + facet_grid(celltype+.~refSet)
+  p = p + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ggtitle(paste('# of Genes',c(50,100,200,500)[ngenes]))
+  print(p)
+
+  tmp = all.results %>%
+    plyr::ddply(.(SampleID, refSet), .fun = function(x){
+          x$refFraction = 0
+          x$refFraction[x$CellType == x$celltype] = 1
+          return(x)
+    }) %>% 
+    dplyr::mutate(diff = abs(value - refFraction))
+  tmp1 = group_by(tmp, SampleID, refSet) %>% dplyr::summarise(er = max(diff, na.rm = T))
+  p = ggplot(tmp1, aes(x = refSet, y = er)) + geom_boxplot() + ylab('L1 Error') + ggtitle(paste('# of Genes',c(50,100,200,500)[ngenes]))
+  print(p)
+
+  cb.results[[ngenes]] = all.results
+}
+```
+
+### Naive DSA
+```{r dsa, fig.height=10, fig.width=10}
+dsa.results = list()
+for (ngenes in 1:4){
+  gl = plyr::llply(FC, .fun = function(x){
+    top_n(x, c(50,100,200,500)[ngenes]) %>%
+      dplyr::select(Gene)
+  }) %>%
+    rbindlist(use.names = T, fill = T, idcol = 'CellType') %>%
+    dplyr::select(Gene, CellType) %>%
+    dplyr::filter(Gene %in% expr$hgnc_symbol)
+
+  exp = data.matrix(expr[,-(1)])
+  rownames(exp) = expr[,1]
+  
+  exp.m = exp[rownames(exp) %in% gl$Gene,  covariates$SampleID]
+  
+  model = DSA(exp.m, gl)
+  w = (t(model$est.weight)/rowSums(t(model$est.weight))) %>%
+    rownameToFirstColumn('SampleID') %>%
+    tidyr::gather(celltype, fraction, -SampleID)
+  
+  wperm = plyr::llply(1:100, .fun = function(i, X, Gl){
+    X1 = apply(X, 2, function(x){x[sample(1:length(x), length(x))]}) 
+    rownames(X1) = rownames(X)
+    model = DSA(X1, Gl)
+    w = (t(model$est.weight)/rowSums(t(model$est.weight))) %>%
+      rownameToFirstColumn('SampleID') %>%
+      tidyr::gather(celltype, fraction, -SampleID) %>%
+      plyr::rename(c('fraction'=paste0('iter',i)))
+  }, exp.m, gl) %>%
+    join_all(type = "left")
+  w$pval = rowSums(wperm[,-(1:2)] >= w[,3])/100
+  w$fraction[w$pval > 0.05] = 0
+  
+  w = w %>%
+    left_join(covariates)
+  p = ggplot(w, aes(x = CellType, y = fraction, color = Study)) + geom_boxplot() + facet_grid(celltype~.)
+  p = p + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ggtitle(paste('# of Genes',c(50,100,200,500)[ngenes]))
+  print(p)
+
+  tmp = w %>%
+    plyr::ddply(.(SampleID), .fun = function(x){
+          x$refFraction = 0
+          x$refFraction[x$CellType == x$celltype] = 1
+          return(x)
+    }) %>% 
+    dplyr::mutate(diff = abs(fraction - refFraction))
+  tmp1 = group_by(tmp, SampleID) %>% dplyr::summarise(er = max(diff, na.rm = T)) %>%
+    dplyr::mutate(AllSamples = 'AllSamples')
+  p = ggplot(tmp1, aes(x = AllSamples, y = er)) + geom_boxplot() + ylab('L1 Error') + ggtitle(paste('# of Genes',c(50,100,200,500)[ngenes]))
+  print(p)
+
+  dsa.results[[ngenes]] = w
+}
+```
+
+### Synapse store
+```{r syn.store, cache=TRUE}
+CODE = Folder(name = 'Test Deconvolution Methods', parentId = parentId)
+CODE = synStore(CODE)
+
+save(list = c('cb.results', 'dsa.results'), file = 'AllResults.RData')
+obj = File('AllResults.RData', name = 'All Fractions', parentId = CODE$properties$id)
+obj = synStore(obj, activityName = activityName, activityDescription = activityDescription,
+               used = ALL_USED_IDs, executed = thisFile)
+```
