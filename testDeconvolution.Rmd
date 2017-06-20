@@ -90,7 +90,7 @@ covariates = covariates %>%
   dplyr::select(SampleID, Study, Tissue, CellType)
 ```
 
-```{r exp.plts}
+```{r exp.plts, fig.height=7, fig.width=15}
 # Exploratory plots
 pl = dlply(covariates, .(Study), .fun = function(cov, expr){
   x = expr[,cov$SampleID]
@@ -150,27 +150,36 @@ multiplot(plotlist = pl, cols = 2)
 ```
 
 ### Get gene signatures
-```{r gene.sig}
+```{r gene.sig, fig.height=7, fig.width=15}
 # From mariet
 load(synGet('syn9818080')@filePath)
 all.used.ids = c(all.used.ids, 'syn9818080')
 
-gene.markers = Reduce(c, CellTypeList) %>%
+gene.markers.mayo = Reduce(c, CellTypeList) %>%
   unique()
+
+# From MSSM group
+gene.markers.mssm = downloadFile('syn10133143')
+all.used.ids = c(all.used.ids, 'syn10133143')
+
+gene.markers = intersect(gene.markers.mayo, gene.markers.mssm$Gene)
 
 # Overall PC
 x = expr[expr$hgnc_symbol %in% gene.markers, covariates$SampleID]
 rownames(x) = x$hgnc_symbol
 pl = list()
-pl[[1]] = pcplot(x, covariates, 'All Genes', rank = F)
-pl[[2]] = pcplot(x, covariates, 'All Genes (Ranked)', rank = T)
+pl[[1]] = pcplot(x, covariates, 'Filtered Genes', rank = F)
+pl[[2]] = pcplot(x, covariates, 'Filtered Genes (Ranked)', rank = T)
 multiplot(plotlist = pl, cols = 2)
 
 # Overall distribution
 pl[[1]] = distPlot(expr[expr$hgnc_symbol %in% gene.markers, ], covariates, 'All Genes', rank = F)
 pl[[2]] = distPlot(expr[expr$hgnc_symbol %in% gene.markers, ], covariates, 'All Genes (Ranked)', rank = T)
 multiplot(plotlist = pl, cols = 2)
+```
 
+### Perform differential expression (to choose signatures)
+```{r diff.exp, eval = F}
 # Raw differential expression from mariet
 obj = synGet('syn9796122')
 FC = lapply(1:5, function(i) {
@@ -182,10 +191,7 @@ FC = lapply(1:5, function(i) {
     dplyr::arrange(desc(FC.sum))
 })
 names(FC) = c('neurons', 'astrocytes', 'microglia', 'oligodendrocytes', 'endothelial')
-```
 
-### Perform differential expression (to choose signatures)
-```{r diff.exp, eval = F}
 X = expr[,-(1)]
 rownames(X) = expr$hgnc_symbol
 expr$hgnc_symbol = NULL
@@ -223,7 +229,7 @@ diff.exp = plyr::ldply(diff.exp, .fun = function(x){
 ```
 
 ### Naive CIBERSORT
-```{r cibersort, fig.height=10, fig.width=10}
+```{r cibersort, fig.height=10, fig.width=10, eval=F}
 cb.results = list()
 for (ngenes in 1:4){
   gl = plyr::llply(FC, .fun = function(x){
@@ -234,17 +240,11 @@ for (ngenes in 1:4){
   }) %>%
     Reduce(c,.) %>% 
     unique()
-
-  all.results = list()
-  for(study in unique(covariates$Study)){
-  cov = dplyr::filter(covariates, Study == study) %>%
-    droplevels %>% data.frame()
-  rownames(cov) = cov$SampleID
   
   exp = data.matrix(expr[,-(1)])
   rownames(exp) = expr[,1]
   
-  exp.r = exp[rownames(exp) %in% gl,  cov$SampleID]
+  exp.r = exp[rownames(exp) %in% gl,  covariates$SampleID]
   exp.r.sum = dlply(cov, .(CellType), .fun = function(x, exp.r){
     tmp = data.frame(V1 = apply(exp.r[, x$SampleID,drop=F],1,mean))
     rownames(tmp) = rownames(exp.r)
@@ -255,7 +255,7 @@ for (ngenes in 1:4){
 
   exp.m = exp[rownames(exp) %in% gl,  covariates$SampleID]
   
-  all.results[[study]] = plyr::ldply(1:dim(exp.m)[2], .fun = function(i, X, Y){
+  all.results = plyr::ldply(1:dim(exp.m)[2], .fun = function(i, X, Y){
     # Core algorithm
     modCIBERSORT <- function(X, y){
       # try different values of nu
@@ -309,9 +309,8 @@ for (ngenes in 1:4){
   .paropts = list(.packages = c('e1071'))) %>%
     dplyr::mutate(refSet = study) %>%
     dplyr::left_join(covariates)
-}
 
-  all.results = rbindlist(all.results, use.names = T, fill = T) %>%
+  all.results = all.results %>%
     tidyr::gather(celltype, value, -SampleID, -rmse, -r, -refSet, -Study, -Tissue, -CellType) %>%
     plyr::ddply(.(SampleID, refSet), .fun = function(x){
       x$refFraction = 0
@@ -319,7 +318,7 @@ for (ngenes in 1:4){
       return(x)
     })
 
-  p = ggplot(tmp, aes(x = CellType, y = value, color = Study)) + geom_boxplot() + facet_grid(celltype+.~refSet)
+  p = ggplot(all.results, aes(x = CellType, y = value, color = Study)) + geom_boxplot() + facet_grid(celltype~.)
   p = p + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ggtitle(paste('# of Genes',c(50,100,200,500)[ngenes]))
   print(p)
 
@@ -338,8 +337,107 @@ for (ngenes in 1:4){
 }
 ```
 
+```{r cibersort.new, fig.height=10, fig.width=10}
+cb.results = list()
+pl1 = list()
+for (ngenes in 1:3){
+  if (ngenes == 1)
+    gl = gene.markers.mayo
+  else if (ngenes == 2)
+    gl = gene.markers.mssm$Gene
+  else
+    gl = gene.markers
+  gl = unique(gl)
+  
+  exp = data.matrix(expr[,-(1)])
+  rownames(exp) = expr[,1]
+  
+  exp.r = exp[rownames(exp) %in% gl,  covariates$SampleID]
+  exp.r.sum = dlply(cov, .(CellType), .fun = function(x, exp.r){
+    tmp = data.frame(V1 = apply(exp.r[, x$SampleID,drop=F],1,mean))
+    rownames(tmp) = rownames(exp.r)
+    colnames(tmp) = unique(x$CellType)
+    return(tmp)
+  }, exp.r) %>%
+    do.call(cbind,.)
+
+  exp.m = exp[rownames(exp) %in% gl,  covariates$SampleID]
+  
+  all.results = plyr::ldply(1:dim(exp.m)[2], .fun = function(i, X, Y){
+    # Core algorithm
+    modCIBERSORT <- function(X, y){
+      # try different values of nu
+      allModels = lapply(c(0.25,0.5,0.75), function(nus){
+        model <- svm(X,y,type="nu-regression",kernel="linear",nu=nus,scale=F)
+        
+        weights = t(model$coefs) %*% model$SV
+        weights[which(weights<0)] = 0
+        w = weights/sum(weights)
+        
+        u <- sweep(X,MARGIN=2,w,'*')
+        k <- apply(u, 1, sum)
+        nusvm <- sqrt((mean((k - y)^2)))
+        corrv <- cor(k, y)
+        
+        return(list(model = model, w = w, k = k, nusvm = nusvm, corrv = corrv))
+      })
+      
+      # pick best model
+      ind <- which.min(sapply(allModels, function(x){x$nusvm}))
+      
+      # get and normalize coefficients
+      w <- allModels[[ind]]$w
+      rmse <- allModels[[ind]]$nusvm
+      corr <- allModels[[ind]]$corrv
+      
+      # do permutation
+      nus = switch(ind, '1' = c(0.25), '2' = c(0.5), '3' = c(0.75))
+      wperm = plyr::ldply(1:100, .fun = function(i, X, y, nus){
+        yperm = y[sample(1:dim(y)[1], dim(y)[1]),1,drop=FALSE]
+        rownames(yperm) = rownames(y)
+        model <- svm(X,yperm,type="nu-regression",kernel="linear",nu=nus,scale=F)
+        weights = t(model$coefs) %*% model$SV
+        weights[which(weights<0)] = 0
+        w = weights/sum(weights)
+      }, X, y, nus)
+      pval = sapply(colnames(wperm), function(colName){
+        sum(wperm[,colName] >= w[1,colName], na.rm = T)/100
+      })  
+      w[pval<=0.05] = 0
+      return(list("w" = w, "mix_rmse" = rmse, "mix_r" = corr))
+    }
+    
+    model = modCIBERSORT(X, Y[,i,drop=FALSE])
+    model$w[model$pval>=0.05] = 0
+    cbind(data.frame(SampleID = colnames(Y)[i]),
+          model$w, 
+          data.frame(rmse = model$mix_rmse, 
+                     r = as.numeric(model$mix_r)))
+  }, exp.r.sum, exp.m, .parallel = T,
+  .paropts = list(.packages = c('e1071'))) %>%
+    dplyr::mutate(refSet = study) %>%
+    dplyr::left_join(covariates)
+
+  all.results = all.results %>%
+    tidyr::gather(celltype, value, -SampleID, -rmse, -r, -refSet, -Study, -Tissue, -CellType) %>%
+    plyr::ddply(.(SampleID, refSet), .fun = function(x){
+      x$refFraction = 0
+      x$refFraction[x$CellType == x$celltype] = 1
+      return(x)
+    })
+
+  p = ggplot(all.results, aes(x = CellType, y = value, color = Study)) + geom_boxplot() + facet_grid(celltype~.)
+  p = p + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ggtitle(paste(c('MAYO','MSSM','INTERSECTION')[ngenes],'Gene List'))
+  p = p + xlab('Original Label') + ylab('Estimated Fraction') + theme(legend.position = 'top')
+  pl1[[ngenes]] = p
+  
+  cb.results[[ngenes]] = all.results
+}
+multiplot(plotlist = pl1, cols = 3)
+```
+
 ### Naive DSA
-```{r dsa, fig.height=10, fig.width=10}
+```{r dsa, fig.height=10, fig.width=10, eval=F}
 dsa.results = list()
 for (ngenes in 1:4){
   gl = plyr::llply(FC, .fun = function(x){
@@ -395,6 +493,63 @@ for (ngenes in 1:4){
 }
 ```
 
+```{r dsa.new, fig.height=10, fig.width=10}
+dsa.results = list()
+pl2 = list()
+for (ngenes in 1:3){
+  if (ngenes == 1)
+    gl = CellTypeList %>%
+      lapply(function(x) data.frame(Symbol = x)) %>%
+      rbindlist(idcol = 'CellType') %>%
+      dplyr::mutate(CellType = gsub('_Zhang_Neuron_2015', '', CellType))
+  else if (ngenes == 2)
+    gl = gene.markers.mssm %>%
+      dplyr::rename(Symbol = Gene, CellType = Module) %>%
+      dplyr::mutate(CellType = factor(CellType, labels =  c("ast" = "Astrocyte", "end" = "Endothelial", "mic" = "Microglia","neu" = "Neuron","oli" = "Oligodendrocytes", "opc" = "OPC")))
+  else
+    gl = dplyr::filter(gene.markers.mssm, Gene %in% gene.markers) %>%
+      dplyr::rename(Symbol = Gene, CellType = Module) %>%
+      dplyr::mutate(CellType = factor(CellType, labels =  c("ast" = "Astrocyte", "end" = "Endothelial", "mic" = "Microglia","neu" = "Neuron","oli" = "Oligodendrocytes", "opc" = "OPC")))
+      
+  gl = unique(gl) %>%
+    dplyr::filter(Symbol %in% expr$hgnc_symbol)
+
+  exp = data.matrix(expr[,-(1)])
+  rownames(exp) = expr[,1]
+  
+  exp.m = exp[,  covariates$SampleID]
+  
+  model = DSA(exp.m, gl[,c('Symbol', 'CellType')])
+  w = (t(model$est.weight)/rowSums(t(model$est.weight))) %>%
+    rownameToFirstColumn('SampleID') %>%
+    tidyr::gather(celltype, fraction, -SampleID)
+  
+  wperm = plyr::llply(1:100, .fun = function(i, X, Gl){
+    X1 = apply(X, 2, function(x){x[sample(1:length(x), length(x))]}) 
+    rownames(X1) = rownames(X)
+    model = DSA(X1, Gl[,c('Symbol', 'CellType')])
+    w = (t(model$est.weight)/rowSums(t(model$est.weight))) %>%
+      rownameToFirstColumn('SampleID') %>%
+      tidyr::gather(celltype, fraction, -SampleID) %>%
+      plyr::rename(c('fraction'=paste0('iter',i)))
+  }, exp.m, gl) %>%
+    join_all(type = "left")
+  w$pval = rowSums(wperm[,-(1:2)] >= w[,3])/100
+  w$fraction[w$pval > 0.05] = 0
+  
+  w = w %>%
+    left_join(covariates)
+
+  p = ggplot(w, aes(x = CellType, y = fraction, color = Study)) + geom_boxplot() + facet_grid(celltype~.)
+  p = p + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ggtitle(paste(c('MAYO','MSSM','INTERSECTION')[ngenes],'Gene List'))
+  p = p + xlab('Original Label') + ylab('Estimated Fraction') + theme(legend.position = 'top')
+  pl2[[ngenes]] = p
+
+  dsa.results[[ngenes]] = w
+}
+multiplot(plotlist = pl2, cols = 3)
+```
+
 ### Synapse store
 ```{r syn.store, cache=TRUE}
 CODE = Folder(name = 'Test Deconvolution Methods', parentId = parentId)
@@ -402,6 +557,5 @@ CODE = synStore(CODE)
 
 save(list = c('cb.results', 'dsa.results'), file = 'AllResults.RData')
 obj = File('AllResults.RData', name = 'All Fractions', parentId = CODE$properties$id)
-obj = synStore(obj, activityName = activityName, activityDescription = activityDescription,
-               used = ALL_USED_IDs, executed = thisFile)
+obj = synStore(obj, activityName = activityName, used = as.character(all.used.ids), executed = thisFile)
 ```
