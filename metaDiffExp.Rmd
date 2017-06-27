@@ -1,0 +1,149 @@
+---
+title: "Differential expression analysis"
+author: "Thanneer Perumal"
+date: "`r date()`"
+output: html_document
+---
+```{r knit2synapse, eval=FALSE}
+library(synapseClient)
+library(knit2synapse)
+
+synapseLogin()
+
+knit2synapse::knitToFolderEntity(file = "./metaDiffExp.Rmd",
+                                 parentId = "syn9890608",
+                                 entityName = "Meta-Differential Expression Results")
+```
+
+```{r libs, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE, cache=FALSE}
+## It is assumed your working directory is where this file
+
+## Load required libraries
+library(CovariateAnalysis) # get it from devtools::install_github('th1vairam/CovariateAnalysis@dev')
+library(data.table)
+library(tidyr)
+library(plyr)
+library(dplyr)
+
+library(synapseClient)
+library(knitr)
+library(githubr)
+
+library(ggplot2)
+library(xlsx)
+
+library(doParallel)
+library(foreach)
+
+cl = makeCluster(detectCores() - 2)
+registerDoParallel(cl)
+
+synapseLogin()
+
+options(xtable.type="html")
+
+knitr::opts_chunk$set(
+  echo=FALSE,
+  warning=FALSE,
+  message=FALSE,
+  error = FALSE,
+  tidy = FALSE,
+  cache = TRUE)
+```
+
+```{r synapse.parameters, include=FALSE, cache=TRUE}
+# Synapse parameters
+parentId = 'syn9890608';
+activityName = 'PErform meta-differential Expression';
+
+thisFileName <- 'metaDiffExp.Rmd'
+
+# Github link
+thisRepo <- getRepo(repository = "th1vairam/CelltypeDeconvolution", ref="branch", refName='deconvolute')
+thisFile <- getPermlink(repository = thisRepo, repositoryPath=thisFileName)
+```
+### Data download
+Obtain log cpm or log fpkm and covariates from synapse.
+```{r download.data, cache=TRUE}
+# Get expression matrix
+expr.ids = c(GSE67835 = 'syn9786960', GSE73721 = 'syn9890519')#GSE52564 = 'syn9890529', )
+expr = lapply(expr.ids, downloadFile)
+all.used.ids = expr.ids
+# expr = join_all(expr, type = 'inner')
+
+# Get covariates matrix
+covariates.ids = c(GSE67835 = 'syn9786959', GSE73721 = 'syn9890517')#GSE52564 = 'syn9890087', 
+covariates = lapply(covariates.ids, downloadFile)
+all.used.ids = c(all.used.ids, covariates.ids)
+
+# Format covariates
+covariates[[1]]$Age = gsub(' years', '', covariates[[1]]$Age) %>%
+  gsub('postnatal ', '', .) %>%
+  as.numeric()
+
+colnames(covariates[[2]]) = c('SampleID', 'Age', 'Tissue', 'CellType')
+# covariates = covariates %>%
+#   rbindlist(use.names = T, fill = T, idcol = 'Study') %>%
+#   dplyr::select(SampleID, Study, Tissue, CellType)
+```
+
+### Perform differential expression (to choose signatures)
+```{r diff.exp, fig.height=20, fig.width=8}
+diff.exp = list()
+for(study in names(covariates)){
+  cov = covariates[[study]]
+  exp = expr[[study]]
+  
+  X = data.matrix(exp[,-(1)])
+  rownames(X) = exp$hgnc_symbol
+  
+  cov$Tissue = as.factor(cov$Tissue)
+  cov$CellType = as.factor(cov$CellType)
+  rownames(cov) = cov$SampleID
+
+  diff.exp[[study]] = list()
+  for(celltype in levels(cov$CellType)){
+    cov1 = cov
+    levels(cov1$CellType)[levels(cov1$CellType) != celltype] = 'Other'
+    cov1 = droplevels(cov1)
+    
+    design = getDesignMatrix(cov1[intersect(cov1$SampleID, colnames(X)),c('CellType', 'Tissue')], Intercept = F)$design
+    colnames(design) = gsub('CellType','', colnames(design))
+    fit = lmFit(X[,intersect(cov$SampleID, colnames(X))], design = design)
+    contrasts = makeContrasts(paste0(celltype,'-Other'), levels = colnames(fit$coefficients))
+    fit.contr = contrasts.fit(fit, contrasts)
+    fit.contr = limma::eBayes(fit.contr)
+    
+    diff.exp[[study]][[celltype]] = topTable(fit.contr, coef = 1, number = 50000, confint = T) %>%
+      rownameToFirstColumn('hgnc_symbol')
+  }
+  diff.exp[[study]] = rbindlist(diff.exp[[study]], use.names = T, fill = T, idcol = 'CellType')
+}
+diff.exp = rbindlist(diff.exp, use.names = T, fill = T, idcol = 'Study')
+
+ggplot(diff.exp, aes(x = logFC, y = -log10(adj.P.Val))) + geom_point() + facet_grid(CellType~Study+.)
+
+writeLines('Total number of differentially expressed genes at an fdr of 0.01 and abs. logfc of 4 are')
+dplyr::group_by(diff.exp, Study, CellType) %>%
+  dplyr::summarise(ncount = length(unique(hgnc_symbol[adj.P.Val <= 0.01 & abs(logFC) >= 4]))) %>%
+  tidyr::spread(CellType, ncount) %>%
+  kable
+
+dplyr::group_by(diff.exp, CellType, hgnc_symbol) %>%
+  dplyr::summarise(ncount = length(hgnc_symbol[adj.P.Val <= 0.01 & abs(logFC) >= 4])) %>%
+  dplyr::filter(ncount == 2) %>%
+  ungroup %>%
+  dplyr::group_by(CellType) %>%
+  dplyr::summarise(genes = paste(unique(hgnc_symbol), collapse = ', ')) %>%
+  kable()
+```
+
+### Synapse store
+```{r syn.store, cache=TRUE}
+CODE = Folder(name = 'Meta-Differential Expression Results', parentId = parentId)
+CODE = synStore(CODE)
+
+save(list = 'diff.exp', file = 'AllResults.RData')
+obj = File('AllResults.RData', name = 'All Fractions', parentId = CODE$properties$id)
+obj = synStore(obj, activityName = activityName, used = as.character(all.used.ids), executed = thisFile)
+```
