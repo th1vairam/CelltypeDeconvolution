@@ -12,7 +12,7 @@ synapseLogin()
 
 knit2synapse::knitToFolderEntity(file = "./testDeconvolution_RFMA.Rmd",
                                  parentId = "syn9890608",
-                                 entityName = "Test Deconvolution Methods - RFMA")
+                                 entityName = "Test Deconvolution Methods - RFMA1")
 ```
 
 ```{r libs, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE, cache=FALSE}
@@ -157,8 +157,8 @@ multiplot(plotlist = pl, cols = 2)
 #   unique()
 
 # From Xue
-load(synGet('syn10152433')@filePath)
-all.used.ids = c(all.used.ids, 'syn10152433')
+load(synGet('syn10152436')@filePath)
+all.used.ids = c(all.used.ids, 'syn10152436')
 gene.markers.rfma1 = Reduce(c, RFMA.gene.celltype.fc2.refined) %>%
   Reduce(c, .) %>%
   unique()
@@ -184,7 +184,7 @@ multiplot(plotlist = pl, cols = 2)
 ```
 
 ### Naive CIBERSORT
-```{r cibersort, fig.height=10, fig.width=10, eval=F}
+```{r cibersort, fig.height=10, fig.width=10}
 exp = data.matrix(expr[,-(1)])
 rownames(exp) = expr[,1]
   
@@ -228,7 +228,7 @@ all.results = plyr::ldply(1:dim(exp.m)[2], .fun = function(i, X, Y){
     
     # do permutation
     nus = switch(ind, '1' = c(0.25), '2' = c(0.5), '3' = c(0.75))
-    wperm = plyr::ldply(1:10, .fun = function(i, X, y, nus){
+    wperm = plyr::ldply(1:100, .fun = function(i, X, y, nus){
       yperm = y[sample(1:dim(y)[1], dim(y)[1]),1,drop=FALSE]
       rownames(yperm) = rownames(y)
       model <- svm(X,yperm,type="nu-regression",kernel="linear",nu=nus,scale=F)
@@ -249,7 +249,7 @@ all.results = plyr::ldply(1:dim(exp.m)[2], .fun = function(i, X, Y){
         model$w, 
         data.frame(rmse = model$mix_rmse, 
                    r = as.numeric(model$mix_r)))
-}, exp.r.sum, exp.m, .parallel = F,
+}, exp.r.sum, exp.m, .parallel = T,
 .paropts = list(.packages = c('e1071'))) %>%
   dplyr::left_join(covariates)
 
@@ -279,7 +279,7 @@ cb.results = all.results
 ```
 
 ### Naive DSA
-```{r dsa, fig.height=10, fig.width=10, eval=F}
+```{r dsa, fig.height=10, fig.width=10}
 exp = data.matrix(expr[,-(1)])
 rownames(exp) = expr[,1]
 
@@ -332,7 +332,7 @@ dsa.results = w
 
 ### Synapse store
 ```{r syn.store, cache=TRUE}
-CODE = Folder(name = 'Test Deconvolution Methods - RFMA', parentId = parentId)
+CODE = Folder(name = 'Test Deconvolution Methods - RFMA1', parentId = parentId)
 CODE = synStore(CODE)
 
 save(list = c('cb.results', 'dsa.results'), file = 'AllResults.RData')
