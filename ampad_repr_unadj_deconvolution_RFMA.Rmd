@@ -10,7 +10,7 @@ library(knit2synapse)
 
 synapseLogin()
 
-knit2synapse::knitToFolderEntity(file = "./ampad_repr_unadj_deconvolution.Rmd",
+knit2synapse::knitToFolderEntity(file = "./ampad_repr_unadj_deconvolution_RFMA.Rmd",
                                  parentId = "syn9890608",
                                  entityName = "AMPAD Reprocessed RNASeq RFMA")
 ```
@@ -41,9 +41,6 @@ cl = makeCluster(detectCores() - 2)
 registerDoParallel(cl)
 
 synapseLogin()
-
-# Source external files
-source('./DSA.R')
 
 options(xtable.type="html")
 
