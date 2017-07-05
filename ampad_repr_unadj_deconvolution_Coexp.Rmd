@@ -205,32 +205,41 @@ gl = rbindlist(list(gene.markers.mayo, gene.markers.mssm), use.names = T, fill =
   dplyr::filter(Symbol %in% rownames(expr))
 
 # Find coexpression modules for each cell type
-gl.new = plyr::dlply(gl, .(CellType), .fun = function(x, expr){
-  datExpr = (expr[as.character(x$Symbol),covariates$SampleID[covariates$Diagnosis=='AD']])
-  
-  et = blockwiseModules(t(datExpr), power = 6,
-                       TOMType = "unsigned", minModuleSize = 30,
-                       reassignThreshold = 0, mergeCutHeight = 0.25,
-                       numericLabels = TRUE, pamRespectsDendro = FALSE,
-                       verbose = 3)
-
-  datExpr1 = (expr[as.character(x$Symbol),covariates$SampleID[covariates$Diagnosis=='CONTROL']])
-  
-  et1 = blockwiseModules(t(datExpr1), power = 6,
-                       TOMType = "unsigned", minModuleSize = 30,
-                       reassignThreshold = 0, mergeCutHeight = 0.25,
-                       numericLabels = TRUE, pamRespectsDendro = FALSE,
-                       verbose = 3)
-
-  overlap = matrix(0,max(et$colors), max(et1$colors))
-  for(i in 1:max(et$colors)){
-    for(j in 1:max(et1$colors)){
-      overlap[i,j] = length(intersect(which(et$colors == i), which(et1$colors == j)))
+gl.new = plyr::llply(unique(covariates$BrainRegion), .fun = function(region, expr, covariates, gl){
+  plyr::dlply(gl, .(CellType), .fun = function(x, expr){
+    datExpr = (expr[as.character(x$Symbol),covariates$SampleID[covariates$Diagnosis=='AD' & covariates$BrainRegion == region]])
+    
+    et = blockwiseModules(t(datExpr), power = 6,
+                          TOMType = "unsigned", minModuleSize = 30,
+                          reassignThreshold = 0, mergeCutHeight = 0.25,
+                          numericLabels = TRUE, pamRespectsDendro = FALSE,
+                          verbose = 3)
+    
+    datExpr1 = (expr[as.character(x$Symbol),covariates$SampleID[covariates$Diagnosis=='CONTROL' & covariates$BrainRegion == region]])
+    
+    et1 = blockwiseModules(t(datExpr1), power = 6,
+                           TOMType = "unsigned", minModuleSize = 30,
+                           reassignThreshold = 0, mergeCutHeight = 0.25,
+                           numericLabels = TRUE, pamRespectsDendro = FALSE,
+                           verbose = 3)
+    
+    overlap = matrix(0,max(et$colors), max(et1$colors))
+    for(i in 1:max(et$colors)){
+      for(j in 1:max(et1$colors)){
+        overlap[i,j] = length(intersect(which(et$colors == i), which(et1$colors == j)))
+      }
     }
-  }
-  ind = arrayInd(which.max(overlap), dim(overlap))
-  as.character(x$Symbol)[(intersect(which(et$colors == ind[1]), which(et1$colors == ind[2])))]
-}, expr)
+    ind = arrayInd(which.max(overlap), dim(overlap))
+    as.character(x$Symbol)[(intersect(which(et$colors == ind[1]), which(et1$colors == ind[2])))]
+  }, expr)
+}, expr, covariates, gl)
+
+gl.new1 = list()
+for(i in 1:6){
+  gl.new1[[i]] = Reduce(c, lapply(gl.new, function(x){(x[[i]])})) %>% unique
+}
+names(gl.new1) = names(gl.new[[1]])
+gl.new = gl.new1
 ```
 
 ### Naive DSA
