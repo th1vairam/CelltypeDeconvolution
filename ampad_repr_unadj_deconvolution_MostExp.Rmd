@@ -1,5 +1,5 @@
 ---
-title: "Cell type deconvolution of reprocessed RNASeq from AMP-AD (unadjusted - RFMA)"
+title: "Cell type deconvolution of reprocessed RNASeq from AMP-AD (unadjusted - Most Expressed)"
 author: "Thanneer Malai Perumal"
 date: "`r date()`"
 output: html_document
@@ -10,9 +10,9 @@ library(knit2synapse)
 
 synapseLogin()
 
-knit2synapse::knitToFolderEntity(file = "./ampad_repr_unadj_deconvolution_RFMA.Rmd",
+knit2synapse::knitToFolderEntity(file = "./ampad_repr_unadj_deconvolution_MostExp.Rmd",
                                  parentId = "syn9890608",
-                                 entityName = "AMPAD Reprocessed RNASeq RFMA")
+                                 entityName = "AMPAD Reprocessed RNASeq (With Most Expressed Genes)")
 ```
 
 ```{r libs, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE, cache=FALSE}
@@ -30,9 +30,10 @@ library(knitr)
 library(githubr)
 
 library(ggplot2)
-library(xlsx)
 library(e1071)
 library(DSA)
+library(cqn)
+library(edgeR)
 
 library(doParallel)
 library(foreach)
@@ -56,9 +57,10 @@ knitr::opts_chunk$set(
 ```{r synapse.parameters, include=FALSE, cache=TRUE}
 # Synapse parameters
 parentId = 'syn9890608';
+nperm = 100
 activityName = 'Celltype deconvolution';
 
-thisFileName <- 'ampad_repr_unadj_deconvolution_RFMA.Rmd'
+thisFileName <- 'ampad_repr_unadj_deconvolution_MostExp.Rmd'
 
 # Github link
 thisRepo <- getRepo(repository = "th1vairam/CelltypeDeconvolution", ref="branch", refName='deconvolute')
@@ -67,23 +69,44 @@ thisFile <- getPermlink(repository = thisRepo, repositoryPath=thisFileName)
 ### Data download
 Obtain raw reprocessed counts and filtered covariates from synapse
 ```{r download.data, cache=TRUE}
-nperm = 100
 # Get covariates from synapse
 covariates.ids = c(ROSMAP = 'syn8456631',
                    MSBB = 'syn8484996',
                    MAYO = 'syn8466814')
 all.used.ids = as.character(covariates.ids)
-covariates = lapply(covariates.ids, downloadFile)
+covariates = lapply(covariates.ids, function(id){
+  read.table(synGet(id)@filePath, header = T, sep = '\t')
+})
+
 covariates$ROSMAP = covariates$ROSMAP %>%
-  dplyr::select(SampleID, Diagnosis) %>%
-  dplyr::mutate(BrainRegion = 'DLPFC')
+  dplyr::mutate(SampleID = as.character(SampleID),
+                BrainRegion = 'DLPFC',
+                BrainRegion.Diagnosis = factor(paste(BrainRegion, Diagnosis, sep = '.')),
+                msex = factor(msex, labels = c('1'='MALE','0'='FEMALE')),
+                Batch = factor(Batch)) %>%
+  dplyr::rename(Gender = msex, RIN = RINcontinuous, AOD = age_death, PMI = pmi) %>%
+  dplyr::select(SampleID, BrainRegion.Diagnosis, Batch, Gender, AOD, PMI, RIN, PCT_PF_READS_ALIGNED, 
+                PCT_CODING_BASES, PCT_INTERGENIC_BASES, PCT_INTRONIC_BASES, PCT_RIBOSOMAL_BASES)
+covariates$ROSMAP$individualIdentifier = factor(paste0('ROSMAPpseudoid',1:dim(covariates$ROSMAP)[1]))
+
 covariates$MSBB = covariates$MSBB %>%
-  dplyr::select(SampleID, BrainRegion.Diagnosis) %>%
-  tidyr::separate(BrainRegion.Diagnosis, c('BrainRegion', 'Diagnosis'), sep = '\\.')
+  dplyr::mutate(SampleID = as.character(SampleID),
+                individualIdentifier = factor(paste0('BB',individualIdentifier)),
+                SEX = factor(SEX, labels = c('M'='MALE','F'='FEMALE')),
+                batch = factor(batch),
+                PMI = PMI/60) %>%
+  dplyr::rename(Batch = batch, Gender = SEX) %>%
+  dplyr::select(SampleID, BrainRegion.Diagnosis, individualIdentifier, Batch, Gender, AOD, PMI, RIN, 
+                PCT_PF_READS_ALIGNED, PCT_CODING_BASES, PCT_INTERGENIC_BASES, PCT_INTRONIC_BASES, PCT_RIBOSOMAL_BASES)
+
 covariates$MAYO = covariates$MAYO %>%
-  dplyr::select(SampleID, BrainRegion.Diagnosis) %>%
-  tidyr::separate(BrainRegion.Diagnosis, c('BrainRegion', 'Diagnosis'), sep = '\\.')
-covariates = rbindlist(covariates, use.names = T, fill = T, idcol = 'Study')
+  dplyr::mutate(SampleID = as.character(SampleID),
+                Donor_ID = factor(paste0('MAYO', Donor_ID)),
+                Gender = factor(Gender, labels = c('M'='MALE','F'='FEMALE')),
+                Batch = factor(Source)) %>%
+  dplyr::rename(individualIdentifier = Donor_ID, AOD = AgeAtDeath) %>%
+  dplyr::select(SampleID, BrainRegion.Diagnosis, individualIdentifier, Batch, Gender, AOD, PMI, RIN, 
+                PCT_PF_READS_ALIGNED, PCT_CODING_BASES, PCT_INTERGENIC_BASES, PCT_INTRONIC_BASES, PCT_RIBOSOMAL_BASES)
 
 # Download sample counts
 counts.id = c(ROSMAP = 'syn8691134',
@@ -92,76 +115,115 @@ counts.id = c(ROSMAP = 'syn8691134',
               MAYO2 = 'syn8690904')
 all.used.ids = c(all.used.ids, as.character(counts.id))
 counts = lapply(counts.id, function(id){
-  tmp = read.table(synGet(id)@filePath, header=T, sep='\t', check.names = F, row.names = 1) %>%
-    rownameToFirstColumn('Gene.ID')
+  tmp = read.table(synGet(id)@filePath, header=T, sep='\t', check.names = F)
 }) %>%
   plyr::join_all(type = 'full')
 
-# Filter Samples
-counts = counts[,c('Gene.ID', covariates$SampleID)]
+# Filter OTHER samples 
+covariates = rbindlist(covariates, use.names = T, fill = T, idcol = 'Study') %>%
+  tidyr::separate(BrainRegion.Diagnosis, c('BrainRegion', 'Diagnosis'), sep = '\\.') %>%
+  dplyr::filter(Diagnosis != 'OTHER') %>%
+  dplyr::mutate(BrainRegion = factor(BrainRegion, levels = c('DLPFC', 'FP', 'IFG', 'PHG', 'STG', 'CER', 'TCX')),
+                BrainRegion.Diagnosis = factor(paste(BrainRegion, Diagnosis, sep = '.')))
 
-# Convert to logcpm
-expr = counts[,-(1)]
-rownames(expr) = counts$Gene.ID
-expr = limma::voom(expr[-(1:4),])$E
+# Match covariates to expression data
+indToRetain = intersect(covariates$SampleID, colnames(counts))
 
-# Get ensembl mapping from synapse
-ENSG2SYM = downloadFile('syn9613401')
-all.used.ids = c(all.used.ids, 'syn9613401')
+COUNT = counts
+rownames(COUNT) = COUNT$feature
+COUNT = COUNT[,indToRetain]
 
-GeneID2SYM = data.frame(Gene.ID = rownames(expr),
-                        ID = rownames(expr)) %>%
-  tidyr::separate(ID, c('ensembl_gene_id', 'position'), sep = '\\.') %>%
-  left_join(ENSG2SYM) %>%
+rownames(covariates) = covariates$SampleID
+covariates = covariates[indToRetain,]
+
+# Get gene specific parameters from synapse
+GENE.PARAM = downloadFile('syn8449369')
+all.used.ids = c(all.used.ids, 'syn8449369')
+
+GENE.LEN = dplyr::select(GENE.PARAM, Gene.ID, gene.length) %>% unique()
+rownames(GENE.LEN) = GENE.LEN$Gene.ID
+
+GENE.GC = dplyr::select(GENE.PARAM, Gene.ID, percentage_gc_content) %>% unique()
+rownames(GENE.GC) = GENE.GC$Gene.ID
+
+GENE.SYM = dplyr::select(GENE.PARAM, Gene.ID, hgnc_symbol) %>% 
   dplyr::group_by(Gene.ID) %>%
-  dplyr::slice(1)
+  dplyr::slice(1) %>%
+  as.data.frame()
+rownames(GENE.SYM) = GENE.SYM$Gene.ID
 
-expr = WGCNA::collapseRows(expr, GeneID2SYM$hgnc_symbol, GeneID2SYM$Gene.ID)$datETcollapsed
+# Gene filtering 
+genesToAnalyze = plyr::dlply(covariates, .(BrainRegion.Diagnosis), .fun = function(mtd, count){
+  processed.counts = getGeneFilteredGeneExprMatrix(count[,mtd$SampleID],
+                                                   MIN_GENE_CPM=1, 
+                                                   MIN_SAMPLE_PERCENT_WITH_MIN_GENE_CPM=0.5)
+  processed.counts$filteredExprMatrix$genes
+}, COUNT)
+
+genesToAnalyze = unlist(genesToAnalyze) %>% 
+  unique() %>%
+  intersect(GENE.GC$Gene.ID[!is.na(GENE.GC$percentage_gc_content)]) %>%
+  intersect(GENE.LEN$Gene.ID[!is.na(GENE.LEN$gene.length)])
+
+PROCESSED_COUNTS = getGeneFilteredGeneExprMatrix(COUNT[genesToAnalyze, ], 
+                                                 MIN_GENE_CPM=0, 
+                                                 MIN_SAMPLE_PERCENT_WITH_MIN_GENE_CPM=0)
+
+# Compute offset for gene length and gc content
+CQN.GENE_EXPRESSION = cqn(PROCESSED_COUNTS$filteredExprMatrix$counts, 
+                          x = GENE.GC[genesToAnalyze, 'percentage_gc_content'],
+                          lengths = GENE.LEN[genesToAnalyze, 'gene.length'],
+                          lengthMethod = "smooth", 
+                          verbose = FALSE)
+CQN.GENE_EXPRESSION$E = CQN.GENE_EXPRESSION$y + CQN.GENE_EXPRESSION$offset
+
+# Collapse Gene.ID to gene symbol
+expr = WGCNA::collapseRows(CQN.GENE_EXPRESSION$E, GENE.SYM[genesToAnalyze, 'hgnc_symbol'], genesToAnalyze)$datETcollapsed
 ```
 
 ### Get gene signatures
 ```{r gene.sig, fig.height=7, fig.width=15}
-# # From mariet
-# load(synGet('syn9818080')@filePath)
-# all.used.ids = c(all.used.ids, 'syn9818080')
+# From mariet
+load(synGet('syn9818080')@filePath)
+all.used.ids = c(all.used.ids, 'syn9818080')
 
-# gene.markers.mayo = CellTypeList %>%
-#       lapply(function(x) data.frame(Symbol = x)) %>%
-#       rbindlist(idcol = 'CellType') %>%
-#       dplyr::mutate(CellType = gsub('_Zhang_Neuron_2015', '', CellType))
+gene.markers.mayo = CellTypeList %>%
+      lapply(function(x) data.frame(Symbol = x)) %>%
+      rbindlist(idcol = 'CellType') %>%
+      dplyr::mutate(CellType = gsub('_Zhang_Neuron_2015', '', CellType))
 
-# # From MSSM group
-# gene.markers.mssm = downloadFile('syn10133143') %>%
-#   dplyr::rename(Symbol = Gene, CellType = Module) %>%
-#   dplyr::mutate(CellType = factor(CellType, labels =  c("ast" = "Astrocyte", "end" = "Endothelial", 
-#                                                         "mic" = "Microglia","neu" = "Neuron",
-#                                                         "oli" = "Oligodendrocytes", "opc" = "OPC")))
-# all.used.ids = c(all.used.ids, 'syn10133143')
+# From MSSM group
+gene.markers.mssm = downloadFile('syn10133143') %>%
+  dplyr::rename(Symbol = Gene, CellType = Module) %>%
+  dplyr::mutate(CellType = factor(CellType, labels =  c("ast" = "Astrocyte", "end" = "Endothelial",
+                                                        "mic" = "Microglia","neu" = "Neuron",
+                                                        "oli" = "Oligodendrocytes", "opc" = "OPC")))
+all.used.ids = c(all.used.ids, 'syn10133143')
 
-# gl = rbindlist(list(gene.markers.mayo, gene.markers.mssm), use.names = T, fill = T) %>%
-#   unique() %>%
-#   dplyr::filter(Symbol %in% rownames(expr))
+gl = rbindlist(list(gene.markers.mayo, gene.markers.mssm), use.names = T, fill = T) %>%
+  unique() %>%
+  dplyr::filter(Symbol %in% rownames(expr))
 
-# From Xue
-load(synGet('syn10152433')@filePath)
-all.used.ids = c(all.used.ids, 'syn10152433')
-
-gene.markers = Reduce(c, RFMA.gene.celltype.fc2.refined) %>%
-  Reduce(c, .) %>%
-  unique()
+gl.new = plyr::dlply(gl, .(CellType), .fun = function(x, expr){
+  tmp = apply(expr[x$Symbol,],1,median, na.rm = T)
+  tmp = data.frame(Symbol = names(tmp), md = tmp) %>%
+    dplyr::arrange(desc(md))
+  tmp$Symbol[which(tmp$md >= median(tmp$md)+sd(tmp$md))] %>%
+    as.character()
+}, expr)
 ```
 
 ### Naive DSA
 ```{r dsa.new, fig.height=10, fig.width=10, include=FALSE}
 gene.markers = mapply(function(x, y){
-  data.frame(CellType = x, genes = y[[1]])
-}, names(RFMA.gene.celltype.fc2.refined), RFMA.gene.celltype.fc2.refined, SIMPLIFY = F) %>%
+  data.frame(CellType = x, genes = y)
+}, names(gl.new), gl.new, SIMPLIFY = F) %>%
   rbindlist(use.names = T, fill = T) %>%
   dplyr::filter(genes %in% rownames(expr)) %>%
   dplyr::mutate(genes = as.character(genes))
 
 # DSA
-model = DSA(expr, gene.markers[,c('genes', 'CellType')])
+model = DSA(expr[gene.markers$genes,], gene.markers[,c('genes', 'CellType')])
 w = (t(model$est.weight)/rowSums(t(model$est.weight))) %>%
   rownameToFirstColumn('SampleID') %>%
   tidyr::gather(celltype, fraction, -SampleID)
@@ -169,7 +231,7 @@ w = (t(model$est.weight)/rowSums(t(model$est.weight))) %>%
 wperm = plyr::llply(1:nperm, .fun = function(i, X, Gl){
   X1 = apply(X, 2, function(x){x[sample(1:length(x), length(x))]}) 
   rownames(X1) = rownames(X)
-  model = DSA(X1, Gl[,c('genes', 'CellType')])
+  model = DSA(X1[Gl$genes,], Gl[,c('genes', 'CellType')])
   w = (t(model$est.weight)/rowSums(t(model$est.weight))) %>%
     rownameToFirstColumn('SampleID') %>%
     tidyr::gather(celltype, fraction, -SampleID) %>%
@@ -302,7 +364,7 @@ cb.results = all.results
 
 ### Synapse store
 ```{r syn.store, cache=TRUE}
-CODE = Folder(name = 'AMPAD Reprocessed RNASeq RFMA', parentId = parentId)
+CODE = Folder(name = 'AMPAD Reprocessed RNASeq (With Most Expressed Genes)', parentId = parentId)
 CODE = synStore(CODE)
 
 save(list = c('w', 'cb.results'), file = 'AllResults.RData')
