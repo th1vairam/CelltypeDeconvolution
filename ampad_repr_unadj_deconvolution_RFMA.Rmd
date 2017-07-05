@@ -272,13 +272,15 @@ all.results = plyr::ldply(1:dim(exp.m)[2], .fun = function(i, X, Y, nperm){
     }, X, y, nus)
     pval = sapply(colnames(wperm), function(colName){
       sum(wperm[,colName] >= w[1,colName], na.rm = T)/nperm
-    })  
-      w[pval<=0.05] = 0
-      return(list("w" = w, "mix_rmse" = rmse, "mix_r" = corr))
-    }
+    })
+    pval = t(pval)
+    colnames(pval) = paste(colnames(pval), 'pval',sep = '.')
+    # w[pval<=0.05] = 0
+    return(list("w" = cbind(w, pval), "mix_rmse" = rmse, "mix_r" = corr))
+  }
     
   model = modCIBERSORT(X, Y[,i,drop=FALSE])
-  model$w[model$pval>=0.05] = 0
+
   cbind(data.frame(SampleID = colnames(Y)[i]),
         model$w, 
         data.frame(rmse = model$mix_rmse, 
@@ -287,11 +289,13 @@ all.results = plyr::ldply(1:dim(exp.m)[2], .fun = function(i, X, Y, nperm){
 .paropts = list(.packages = c('e1071'))) %>%
   dplyr::left_join(covariates)
 
-all.results = all.results %>%
-  tidyr::gather(celltype, value, -SampleID, -rmse, -r, -Study, -BrainRegion, -Diagnosis) 
-p = ggplot(all.results, aes(x = BrainRegion, y = value, color = Diagnosis)) + geom_boxplot() + facet_grid(celltype~.)
+all.results1 = all.results %>%
+  tidyr::gather(celltype, value, -SampleID, -rmse, -r, -Study, -BrainRegion, -Diagnosis) %>%
+  tidyr::separate(celltype, c('celltype1','pval'),sep = '\\.') %>%
+  dplyr::filter(is.na(pval))
+p = ggplot(all.results1, aes(x = BrainRegion, y = value, color = Diagnosis)) + geom_boxplot() + facet_grid(celltype1~.)
 p = p + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ggtitle(paste('Cibersort'))
-print(p)
+p
 
 pl = list()
 pl[[1]] = ggplot(all.results, aes(x = Diagnosis, y = rmse)) + geom_boxplot()
@@ -307,5 +311,12 @@ CODE = synStore(CODE)
 
 save(list = c('w', 'cb.results'), file = 'AllResults.RData')
 obj = File('AllResults.RData', name = 'All Fractions', parentId = CODE$properties$id)
+obj = synStore(obj, activityName = activityName, used = as.character(all.used.ids), executed = thisFile)
+
+all.results1 %>%
+  dplyr::select(SampleID, celltype1, value) %>%
+  tidyr::spread(celltype1, value) %>%
+  write.table(file = 'deconvFrac.tsv', sep = '\t', row.names = F, quote = F)
+obj = File('deconvFrac.tsv', name = 'Deconvoluted Fractions', parentId = CODE$properties$id)
 obj = synStore(obj, activityName = activityName, used = as.character(all.used.ids), executed = thisFile)
 ```
