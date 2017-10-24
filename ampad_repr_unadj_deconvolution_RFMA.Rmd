@@ -32,7 +32,7 @@ library(githubr)
 library(ggplot2)
 library(xlsx)
 library(e1071)
-library(DSA)
+library(CellMix)
 
 library(doParallel)
 library(foreach)
@@ -67,7 +67,7 @@ thisFile <- getPermlink(repository = thisRepo, repositoryPath=thisFileName)
 ### Data download
 Obtain raw reprocessed counts and filtered covariates from synapse
 ```{r download.data, cache=TRUE}
-nperm = 100
+nperm = 10
 # Get covariates from synapse
 covariates.ids = c(ROSMAP = 'syn8456631',
                    MSBB = 'syn8484996',
@@ -146,9 +146,8 @@ expr = WGCNA::collapseRows(expr, GeneID2SYM$hgnc_symbol, GeneID2SYM$Gene.ID)$dat
 load(synGet('syn10152433')@filePath)
 all.used.ids = c(all.used.ids, 'syn10152433')
 
-gene.markers = Reduce(c, RFMA.gene.celltype.fc2.refined) %>%
-  Reduce(c, .) %>%
-  unique()
+gene.markers = Reduce(c, RFMA.gene.celltype.fc2.refined)
+names(gene.markers) = names(RFMA.gene.celltype.fc2.refined)
 ```
 
 ### Naive DSA
