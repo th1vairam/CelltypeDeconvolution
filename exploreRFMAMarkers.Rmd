@@ -167,5 +167,5 @@ obj = synStore(obj, used = all.entities$entity.id[c(ind1,ind2)], executed = this
 ```
 ```{r knit2syn, eval=FALSE}
 # Create analysis wiki
-knit2synapse::knitfile2synapse('exploreRFMAMarkers.Rmd', owner = obj$properties$id)
+knit2synapse::knitfile2synapse('exploreRFMAMarkers.Rmd', owner = 'syn11308571')
 ```
