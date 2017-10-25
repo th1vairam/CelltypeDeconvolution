@@ -1,0 +1,171 @@
+---
+title: "Explore RFMA markers from Xue"
+author: "Thanneer M Perumal"
+date: `r base::date()`
+output: html_document
+---
+```{r libs, cache=FALSE, include=FALSE}
+# Load required libraries
+library(CovariateAnalysis)
+library(data.table)
+library(tidyr)
+library(plyr)
+library(dplyr)
+library(stringr)
+
+library(synapseClient)
+library(knitr)
+library(githubr)
+
+synapseLogin()
+```
+
+```{r fxn, include=FALSE}
+# Function to recursively get entities with in a folder
+recursiveQuerySynapseFolder <- function(id){
+  allEntity = synQuery(paste('select nodeType,id,name from entity where parentId == "',id,'"'))
+  
+  if (any(allEntity$entity.nodeType == 'folder')){
+    allFolderEntities = allEntity %>%
+      dplyr::filter(entity.nodeType == 'folder') %>%
+      plyr::ddply(.(entity.id), .fun = function(x){ recursiveQuerySynapseFolder(x$entity.id)})
+  } else {
+    allFolderEntities = data.frame()
+  }
+  
+  allFileEntities = allEntity %>%
+    dplyr::filter(entity.nodeType == 'file') %>%
+    list(.,allFolderEntities) %>%
+    rbindlist(use.names = T, fill = T)
+}
+
+```
+
+#### Get RFMA results from synapse
+```{r get.markers, include=FALSE}
+# Iteratively query synapse for all the RData files from Xue
+parent.folder.id = 'syn11297613'
+all.entities = recursiveQuerySynapseFolder(parent.folder.id)
+
+# Get all markers estimated using logCPM matrix
+ind1 = grep('fromLogCPM.Rdata', all.entities$entity.name)
+all.sign.lcpm = plyr::ddply(all.entities[ind1,], .(entity.name), .fun = function(x){
+  load(synGet(x$entity.id)@filePath)
+  plyr::ldply(marker.cpm.refined, .fun = data.frame, .id = 'celltype') %>%
+    dplyr::rename(ensembl_gene_id = X..i..)
+}) %>%
+  dplyr::mutate(entity.name = gsub('marker_refined_fromLogCPM.Rdata','',entity.name)) %>%
+  dplyr::rename(brainRegion = entity.name) %>%
+  dplyr::filter(brainRegion != 'ROSMAP')
+
+# Get all markers estimated using residual matrix
+ind2 = grep('fromRes.Rdata', all.entities$entity.name)
+all.sign.res = plyr::ddply(all.entities[ind2,], .(entity.name), .fun = function(x){
+  load(synGet(x$entity.id)@filePath)
+  plyr::ldply(marker.res.refined, .fun = data.frame, .id = 'celltype') %>%
+    dplyr::rename(ensembl_gene_id = X..i..)
+}) %>%
+  dplyr::mutate(entity.name = gsub('marker_refined_fromRes.Rdata','',entity.name)) %>%
+  dplyr::rename(brainRegion = entity.name) %>%
+  dplyr::filter(brainRegion != 'ROSMAP')
+```
+
+#### Markers from lcpm matrix
+```{r lcpm, results='asis'}
+writeLines('Total number of markers')
+dplyr::group_by(all.sign.lcpm, brainRegion, celltype) %>% 
+  dplyr::count() %>% 
+  tidyr::spread(celltype, n) %>%
+  kable()
+
+writeLines('Mean number of markers per celltype')
+dplyr::group_by(all.sign.lcpm, brainRegion, celltype) %>% 
+  dplyr::count() %>%
+  dplyr::group_by(celltype) %>% 
+  dplyr::summarise(nMean = round(mean(n))) %>%
+  list() %>%
+  c(.,lapply(7:1, function(i, all.sign.lcpm){
+    dplyr::group_by(all.sign.lcpm, ensembl_gene_id, celltype) %>% 
+      dplyr::count() %>% 
+      dplyr::filter(n >= i) %>%
+      dplyr::group_by(celltype) %>% 
+      dplyr::summarise(count = length(unique(ensembl_gene_id))) %>%
+      plyr::rename(c('count' = paste('Atleast in',i,'brain region')))
+    }, all.sign.lcpm)) %>%
+  join_all() %>%
+  kable()
+
+writeLines('Based on the above tables we select at least 7, 5 and 1 brain region gene sets for further analysis')
+sig.lcpm.atleast7 = dplyr::group_by(all.sign.lcpm, ensembl_gene_id, celltype) %>% 
+  dplyr::count() %>% 
+  dplyr::filter(n >= 7)
+
+sig.lcpm.atleast5 = dplyr::group_by(all.sign.lcpm, ensembl_gene_id, celltype) %>% 
+  dplyr::count() %>% 
+  dplyr::filter(n >= 5)
+
+sig.lcpm.atleast1 = dplyr::group_by(all.sign.lcpm, ensembl_gene_id, celltype) %>% 
+  dplyr::count() %>% 
+  dplyr::filter(n >= 1)
+```
+#### Markers from res matrix
+```{r res, results='asis'}
+writeLines('Total number of markers')
+dplyr::group_by(all.sign.res, brainRegion, celltype) %>% 
+  dplyr::count() %>% 
+  tidyr::spread(celltype, n) %>%
+  kable()
+
+writeLines('Mean number of markers per celltype')
+dplyr::group_by(all.sign.res, brainRegion, celltype) %>% 
+  dplyr::count() %>%
+  dplyr::group_by(celltype) %>% 
+  dplyr::summarise(nMean = round(mean(n))) %>%
+  list() %>%
+  c(.,lapply(7:1, function(i, all.sign.res){
+    dplyr::group_by(all.sign.res, ensembl_gene_id, celltype) %>% 
+      dplyr::count() %>% 
+      dplyr::filter(n >= i) %>%
+      dplyr::group_by(celltype) %>% 
+      dplyr::summarise(count = length(unique(ensembl_gene_id))) %>%
+      plyr::rename(c('count' = paste('Atleast in',i,'brain region')))
+    }, all.sign.res)) %>%
+  join_all() %>%
+  kable()
+
+writeLines('Based on the above tables we select at least 7, 5 and 1 brain region gene sets for further analysis')
+sig.res.atleast7 = dplyr::group_by(all.sign.res, ensembl_gene_id, celltype) %>% 
+  dplyr::count() %>% 
+  dplyr::filter(n >= 7)
+
+sig.res.atleast5 = dplyr::group_by(all.sign.res, ensembl_gene_id, celltype) %>% 
+  dplyr::count() %>% 
+  dplyr::filter(n >= 5)
+
+sig.res.atleast1 = dplyr::group_by(all.sign.res, ensembl_gene_id, celltype) %>% 
+  dplyr::count() %>% 
+  dplyr::filter(n >= 1)
+```
+#### Synapse store
+```{r syn.store}
+# Synapse parameters
+parentId = 'syn9890608';
+activityName = 'Explore RFMA markers';
+
+thisFileName <- 'exploreRFMAMarkers.Rmd'
+
+# Github link
+thisRepo <- getRepo(repository = "th1vairam/CelltypeDeconvolution", ref="branch", refName='curateRfmaMarkers')
+thisFile <- getPermlink(repository = thisRepo, repositoryPath=paste0(thisFileName))
+
+# Store results in synapse
+save(list = c('sig.lcpm.atleast1', 'sig.lcpm.atleast5', 'sig.lcpm.atleast7',
+              'sig.res.atleast1', 'sig.res.atleast1', 'sig.res.atleast1'),
+     file = 'filteredSignatures.Rdata')
+obj = File('filteredSignatures.Rdata', name = 'Filtered RFMA Signatures', parentId = parentId)
+obj = synStore(obj, used = all.entities$entity.id[c(ind1,ind2)], executed = thisFile, activityName = activityName)
+```
+```{r knit2syn, eval=FALSE}
+# Create analysis wiki
+knit2synapse::knitfile2synapse('exploreRFMAMarkers.Rmd', owner = obj$properties$id)
+```
