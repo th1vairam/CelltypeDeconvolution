@@ -12,7 +12,7 @@ synapseLogin()
 
 knit2synapse::knitToFolderEntity(file = "./ampad_repr_unadj_deconvolution_cibersort.Rmd",
                                  parentId = "syn9890608",
-                                 entityName = "Cell type frctions - AMPAD - with lcpm signatures - using cibersort")
+                                 entityName = "Cell type fractions - AMPAD - with lcpm signatures - using cibersort")
 ```
 
 ```{r libs, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE, cache=FALSE}
@@ -51,7 +51,7 @@ knitr::opts_chunk$set(
   cache = TRUE)
 ```
 
-```{r synapse.parameters, include=FALSE, cache=TRUE}
+```{r synapse.parameters, include=FALSE, cache=FALSE}
 # Synapse parameters
 parentId = 'syn9890608';
 activityName = 'Celltype deconvolution';
@@ -63,7 +63,7 @@ thisRepo <- getRepo(repository = "th1vairam/CelltypeDeconvolution", ref="branch"
 thisFile <- getPermlink(repository = thisRepo, repositoryPath=thisFileName)
 
 # Number of permutations
-nperm = 10
+nperm = 100
 ```
 ### Data download
 Obtain raw reprocessed counts and filtered covariates from synapse
@@ -195,8 +195,37 @@ cibersort.estimated.fractions = list(any1 = sig.lcpm.atleast1, any5 = sig.lcpm.a
     return(estimated.fractions)
   }, .id = 'nBrainRegions')
 ```
+### Plot comparisons
+```{r comp, fig.height=8, fig.width=14}
+cibersort.estimated.fractions = cibersort.estimated.fractions %>%
+  tidyr::gather(celltype, fraction, -contains('.pval'), -nBrainRegions, -SampleID, -mix_rmse, -mix_r) %>%
+  tidyr::gather(celltype.pval, pval, -celltype, -fraction, -nBrainRegions, -SampleID, -mix_rmse, -mix_r) %>%
+  dplyr::select(-celltype.pval) %>%
+  dplyr::rename(fdr = pval)
+
+ggplot(cibersort.estimated.fractions, aes(x = nBrainRegions, y = fraction, color = celltype)) + geom_boxplot() + facet_grid(.~celltype) + theme(legend.position = 'top') + ggtitle('Cell type fractions')
+ggplot(cibersort.estimated.fractions, aes(x = nBrainRegions, y = fdr, color = celltype)) + geom_boxplot() + facet_grid(.~celltype) + theme(legend.position = 'top') + ggtitle('FDR')
+
+tmp1 = cibersort.estimated.fractions %>%
+  dplyr::select(nBrainRegions, celltype, fraction, fdr) %>%
+  dplyr::filter(nBrainRegions == 'any1') %>%
+  dplyr::select(-nBrainRegions)
+tmp2 = cibersort.estimated.fractions %>%
+  dplyr::select(nBrainRegions, celltype, fraction, fdr) %>%
+  dplyr::filter(nBrainRegions == 'any5') %>%
+  dplyr::select(-nBrainRegions) %>%
+  dplyr::rename(fraction1 = fraction, fdr1 = fdr)
+tmp = cbind(tmp1, tmp2)
+```
+```{r comp1, fig.height=6, fig.width=12}
+p = ggplot(tmp, aes(x = fraction, y = fraction1, color = celltype)) + geom_point() 
+p = p + geom_smooth(method = 'loess') + facet_grid(.~celltype) + geom_abline(slope=1)
+p = p + theme(legend.position = 'top') + xlab('any1') + ylab('any5')
+p
+```
+
 ### Synapse store
-```{r syn.store, cache=TRUE}
+```{r syn.store, cache=FALSE}
 CODE = Folder(name = 'Cell type fractions - AMPAD - with lcpm signatures - using cibersort', parentId = parentId)
 CODE = synStore(CODE)
 

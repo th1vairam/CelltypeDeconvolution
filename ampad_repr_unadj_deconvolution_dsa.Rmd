@@ -1,5 +1,5 @@
 ---
-title: Cell type deconvolution of reprocessed RNASeq from AMP-AD (unadjusted lcpm - with RFMA lcpm signatures)
+title: Cell type deconvolution of reprocessed RNASeq from AMP-AD (unadjusted - with RFMA signatures using dsa)
 author: Thanneer Malai Perumal
 date: `r date()`
 output: html_document
@@ -10,9 +10,9 @@ library(knit2synapse)
 
 synapseLogin()
 
-knit2synapse::knitToFolderEntity(file = "./ampad_repr_unadj_deconvolution_RFMA_lcpm.Rmd",
+knit2synapse::knitToFolderEntity(file = "./ampad_repr_unadj_deconvolution_dsa.Rmd",
                                  parentId = "syn9890608",
-                                 entityName = "Cell type frctions - AMPAD - with lcpm signatures")
+                                 entityName = "Cell type fractions - AMPAD - with lcpm signatures - using DSA")
 ```
 
 ```{r libs, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE, cache=FALSE}
@@ -65,7 +65,7 @@ thisRepo <- getRepo(repository = "th1vairam/CelltypeDeconvolution", ref="branch"
 thisFile <- getPermlink(repository = thisRepo, repositoryPath=thisFileName)
 
 # Number of permutations
-nperm = 10
+nperm = 100
 ```
 ### Data download
 Obtain raw reprocessed counts and filtered covariates from synapse
@@ -129,7 +129,7 @@ gc()
 
 ### CellMix DSA (with lcpm)
 ```{r dsa.lcpm, fig.height=10, fig.width=10, include=FALSE}
-dsa.estimated.fractions.lcpm = list(any1 = sig.lcpm.atleast1, any5 = sig.lcpm.atleast5, any7 = sig.lcpm.atleast7) %>%
+dsa.estimated.fractions = list(any1 = sig.lcpm.atleast1, any5 = sig.lcpm.atleast5, any7 = sig.lcpm.atleast7) %>%
   plyr::ldply(.fun = function(sig.lcpm, lcpm, nperm){
     # Get gene markers
     gene.markers = sig.lcpm %>%
@@ -177,10 +177,47 @@ dsa.estimated.fractions.lcpm = list(any1 = sig.lcpm.atleast1, any5 = sig.lcpm.at
     return(estimated.fractions)
   }, lcpm, nperm, .id = 'nBrainRegionSig')
 ```
+### Plot comparisons
+```{r comp, fig.height=8, fig.width=14}
+ggplot(dsa.estimated.fractions, aes(x = nBrainRegionSig, y = Value, color = CellType)) + geom_boxplot() + facet_grid(.~CellType) + theme(legend.position = 'top') + ggtitle('Cell type fractions using DSA') + ylab('Fraction')
+ggplot(dsa.estimated.fractions, aes(x = nBrainRegionSig, y = fdr, color = CellType)) + geom_boxplot() + facet_grid(.~CellType) + theme(legend.position = 'top') + ggtitle('Cell type fractions using DSA') + ylab('FDR')
+
+tmp1 = dsa.estimated.fractions %>%
+  dplyr::select(nBrainRegionSig, CellType, Value, fdr) %>%
+  dplyr::filter(nBrainRegionSig == 'any1') %>%
+  dplyr::select(-nBrainRegionSig)
+tmp2 = dsa.estimated.fractions %>%
+  dplyr::select(nBrainRegionSig, CellType, Value, fdr) %>%
+  dplyr::filter(nBrainRegionSig == 'any5') %>%
+  dplyr::select(-nBrainRegionSig) %>%
+  dplyr::rename(Value1 = Value, fdr1 = fdr)
+tmp3 = dsa.estimated.fractions %>%
+  dplyr::select(nBrainRegionSig, CellType, Value, fdr) %>%
+  dplyr::filter(nBrainRegionSig == 'any7') %>%
+  dplyr::select(-nBrainRegionSig) %>%
+  dplyr::rename(Value2 = Value, fdr2 = fdr)
+tmp = cbind(tmp1, tmp2, tmp3)
+```
+```{r comp1, fig.height=6, fig.width=12}
+p = ggplot(tmp, aes(x = Value, y = Value1, color = CellType)) + geom_point() 
+p = p + geom_smooth(method = 'loess') + facet_grid(.~CellType, scales = 'free')
+p = p + theme(legend.position = 'top') + xlab('any1') + ylab('any5')
+p
+
+p = ggplot(tmp, aes(x = Value1, y = Value2, color = CellType)) + geom_point() 
+p = p + geom_smooth(method = 'loess') + facet_grid(.~CellType, scales = 'free')
+p = p + theme(legend.position = 'top') + xlab('any5') + ylab('any7')
+p
+
+p = ggplot(tmp, aes(x = Value, y = Value2, color = CellType)) + geom_point() 
+p = p + geom_smooth(method = 'loess') + facet_grid(.~CellType, scales = 'free')
+p = p + theme(legend.position = 'top') + xlab('any1') + ylab('any7')
+p
+```
 
 ### Synapse store
 ```{r syn.store, cache=TRUE}
-CODE = Folder(name = 'Cell type frctions - AMPAD - with lcpm signatures', parentId = parentId)
+CODE = Folder(name = 'Cell type fractions - AMPAD - with lcpm signatures - using DSA', parentId = parentId)
 CODE = synStore(CODE)
 
 write.table(dsa.estimated.fractions.lcpm, file = 'deconvFracLcpm.tsv', sep = '\t', row.names = F, quote = F)
