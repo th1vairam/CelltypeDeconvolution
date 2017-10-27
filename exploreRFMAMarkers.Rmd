@@ -160,7 +160,7 @@ thisFile <- getPermlink(repository = thisRepo, repositoryPath=paste0(thisFileNam
 
 # Store results in synapse
 save(list = c('sig.lcpm.atleast1', 'sig.lcpm.atleast5', 'sig.lcpm.atleast7',
-              'sig.res.atleast1', 'sig.res.atleast1', 'sig.res.atleast1'),
+              'sig.res.atleast1', 'sig.res.atleast5', 'sig.res.atleast7'),
      file = 'filteredSignatures.Rdata')
 obj = File('filteredSignatures.Rdata', name = 'Filtered RFMA Signatures', parentId = parentId)
 obj = synStore(obj, used = all.entities$entity.id[c(ind1,ind2)], executed = thisFile, activityName = activityName)
