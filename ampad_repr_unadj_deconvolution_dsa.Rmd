@@ -1,0 +1,189 @@
+---
+title: Cell type deconvolution of reprocessed RNASeq from AMP-AD (unadjusted lcpm - with RFMA lcpm signatures)
+author: Thanneer Malai Perumal
+date: `r date()`
+output: html_document
+---
+```{r knit2synapse, eval=FALSE, include=FALSE}
+library(synapseClient)
+library(knit2synapse)
+
+synapseLogin()
+
+knit2synapse::knitToFolderEntity(file = "./ampad_repr_unadj_deconvolution_RFMA_lcpm.Rmd",
+                                 parentId = "syn9890608",
+                                 entityName = "Cell type frctions - AMPAD - with lcpm signatures")
+```
+
+```{r libs, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE, cache=FALSE}
+## It is assumed your working directory is where this file
+
+## Load required libraries
+library(CovariateAnalysis) # get it from devtools::install_github('th1vairam/CovariateAnalysis@dev')
+library(data.table)
+library(tidyr)
+library(plyr)
+library(dplyr)
+
+library(synapseClient)
+library(knitr)
+library(githubr)
+
+library(e1071)
+library(CellMix)
+library(DSA)
+library(ggplot2)
+
+# library(doParallel)
+# library(foreach)
+# 
+# cl = makeCluster(detectCores() - 2)
+# registerDoParallel(cl)
+
+synapseLogin()
+
+options(xtable.type="html")
+
+knitr::opts_chunk$set(
+  echo=FALSE,
+  warning=FALSE,
+  message=FALSE,
+  error = FALSE,
+  tidy = FALSE,
+  cache = TRUE)
+```
+
+```{r synapse.parameters, include=FALSE, cache=TRUE}
+# Synapse parameters
+parentId = 'syn9890608';
+activityName = 'Celltype deconvolution';
+
+thisFileName <- 'ampad_repr_unadj_deconvolution_dsa.Rmd'
+
+# Github link
+thisRepo <- getRepo(repository = "th1vairam/CelltypeDeconvolution", ref="branch", refName='deconvolute')
+thisFile <- getPermlink(repository = thisRepo, repositoryPath=thisFileName)
+
+# Number of permutations
+nperm = 10
+```
+### Data download
+Obtain raw reprocessed counts and filtered covariates from synapse
+```{r download.data, cache=TRUE}
+# Get covariates from synapse
+covariates.ids = c(ROSMAP = 'syn8456631',
+                   MSBB = 'syn8484996',
+                   MAYO = 'syn8466814')
+all.used.ids = as.character(covariates.ids)
+covariates = lapply(covariates.ids, downloadFile)
+covariates$ROSMAP = covariates$ROSMAP %>%
+  dplyr::select(SampleID, Diagnosis) %>%
+  dplyr::mutate(BrainRegion = 'DLPFC')
+covariates$MSBB = covariates$MSBB %>%
+  dplyr::select(SampleID, BrainRegion.Diagnosis) %>%
+  tidyr::separate(BrainRegion.Diagnosis, c('BrainRegion', 'Diagnosis'), sep = '\\.')
+covariates$MAYO = covariates$MAYO %>%
+  dplyr::select(SampleID, BrainRegion.Diagnosis) %>%
+  tidyr::separate(BrainRegion.Diagnosis, c('BrainRegion', 'Diagnosis'), sep = '\\.')
+covariates = rbindlist(covariates, use.names = T, fill = T, idcol = 'Study')
+
+# Download sample counts
+counts.id = c(ROSMAP = 'syn8691134',
+              MSBB = 'syn8691099',
+              MAYO1 = 'syn8690799', 
+              MAYO2 = 'syn8690904')
+all.used.ids = c(all.used.ids, as.character(counts.id))
+counts = lapply(counts.id, function(id){
+  tmp = read.table(synGet(id)@filePath, header=T, sep='\t', check.names = F, row.names = 1) %>%
+    rownameToFirstColumn('Gene.ID')
+}) %>%
+  plyr::join_all(type = 'full')
+
+# Filter Samples
+counts = counts[,c('Gene.ID', covariates$SampleID)]
+
+# Convert to logcpm
+lcpm = counts[,-(1)]
+rownames(lcpm) = lcpm$Gene.ID
+lcpm = limma::voom(lcpm[-(1:4),])$E
+rownames(lcpm) = counts$Gene.ID[-(1:4)]
+
+# Get residual matrix from synapse
+res = downloadFile('syn10160757')
+all.used.ids = c(all.used.ids, 'syn10160757')
+rownames(res) = res$ensembl_gene_id
+res$ensembl_gene_id = NULL
+
+# Get RFMA derived cell type signature gene sets from synapse
+load(synGet('syn11308571')@filePath)
+
+# Get ensembl mapping from synapse
+Gene.ID = data.frame(Gene.ID = counts$Gene.ID,
+                     GeneID = counts$Gene.ID) %>%
+  tidyr::separate(GeneID, c('ensembl_gene_id','position'), sep = '\\.')
+rownames(Gene.ID) = Gene.ID$Gene.ID
+
+rm(list='counts')
+gc()
+```
+
+### CellMix DSA (with lcpm)
+```{r dsa.lcpm, fig.height=10, fig.width=10, include=FALSE}
+dsa.estimated.fractions.lcpm = list(any1 = sig.lcpm.atleast1, any5 = sig.lcpm.atleast5, any7 = sig.lcpm.atleast7) %>%
+  plyr::ldply(.fun = function(sig.lcpm, lcpm, nperm){
+    # Get gene markers
+    gene.markers = sig.lcpm %>%
+      dplyr::select(celltype, ensembl_gene_id) %>%
+      dplyr::left_join(Gene.ID) 
+    
+    # Subset log cpm
+    subset.lcpm = lcpm[rownames(lcpm) %in% unique(gene.markers$Gene.ID),]
+    
+    gene.markers = gene.markers %>%
+      plyr::dlply(.(celltype), .fun = function(x) as.character(unique(x$Gene.ID))) %>%
+      MarkerList()
+      
+    ## DSA
+    estimated.fractions = CellMix::DSAproportions(subset.lcpm, gene.markers, log = TRUE, verbose = TRUE) %>%
+      apply(2, function(x) x/sum(x)) %>%
+      CovariateAnalysis::rownameToFirstColumn('CellType') %>%
+      tidyr::gather(SampleID, Value, -CellType)
+    
+    # Estimate cell type proportions using permuted fractions
+    permuted.fractions = plyr::llply(1:nperm, .fun = function(i, lcpm, gene.markers){
+      perm.lcpm = lcpm
+      rownames(perm.lcpm) = rownames(lcpm)[sample(1:dim(lcpm)[1], dim(lcpm)[1])]
+      tmp = CellMix::DSAproportions(perm.lcpm, gene.markers, log = TRUE, verbose = TRUE) %>%
+        apply(2, function(x) x/sum(x)) %>%
+        CovariateAnalysis::rownameToFirstColumn('CellType') %>%
+        tidyr::gather(SampleID, Value, -CellType) %>%
+        plyr::rename(c('Value' = i))
+      gc()
+      return(tmp)
+    }, subset.lcpm, gene.markers, .parallel = F, .paropts = list(.packages = c('dplyr', 'CovariateAnalysis', 'tidyr', 'CellMix'))) %>%
+      plyr::join_all(type = 'left')
+    
+    estimated.fractions = estimated.fractions %>%
+      plyr::ddply(.(CellType, SampleID), .fun = function(x, permuted.fractions){
+        permFractions = dplyr::filter(permuted.fractions, 
+                                      CellType == x$CellType,
+                                      SampleID == x$SampleID)
+        x$pval = sum(permFractions[1,-(1:2)] >= x$Value)/nperm
+        return(x)
+      }, permuted.fractions, .parallel = F, .paropts = list(.packages = c('dplyr'))) %>%
+      dplyr::group_by(SampleID) %>%
+      dplyr::mutate(fdr = p.adjust(pval))
+    
+    return(estimated.fractions)
+  }, lcpm, nperm, .id = 'nBrainRegionSig')
+```
+
+### Synapse store
+```{r syn.store, cache=TRUE}
+CODE = Folder(name = 'Cell type frctions - AMPAD - with lcpm signatures', parentId = parentId)
+CODE = synStore(CODE)
+
+write.table(dsa.estimated.fractions.lcpm, file = 'deconvFracLcpm.tsv', sep = '\t', row.names = F, quote = F)
+obj = File('deconvFracLcpm.tsv', name = 'Deconvoluted Fractions - RFMA - dsa', parentId = CODE$properties$id)
+obj = synStore(obj, activityName = activityName, used = as.character(all.used.ids), executed = thisFile)
+```
