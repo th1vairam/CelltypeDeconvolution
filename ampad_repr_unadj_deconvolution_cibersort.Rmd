@@ -32,11 +32,11 @@ library(githubr)
 library(e1071)
 library(ggplot2)
 
-library(doParallel)
-library(foreach)
-
-cl = makeCluster(detectCores() - 2)
-registerDoParallel(cl)
+# library(doParallel)
+# library(foreach)
+# 
+# cl = makeCluster(detectCores() - 2)
+# registerDoParallel(cl)
 
 synapseLogin()
 
@@ -200,7 +200,7 @@ cibersort.estimated.fractions = list(any1 = sig.lcpm.atleast1, any5 = sig.lcpm.a
 CODE = Folder(name = 'Cell type fractions - AMPAD - with lcpm signatures - using cibersort', parentId = parentId)
 CODE = synStore(CODE)
 
-write.table(cibersort.estimated.fractions.lcpm, file = 'deconvFracLcpm.tsv', sep = '\t', row.names = F, quote = F)
+write.table(cibersort.estimated.fractions, file = 'deconvFracLcpm.tsv', sep = '\t', row.names = F, quote = F)
 obj = File('deconvFracLcpm.tsv', name = 'Deconvoluted Fractions - RFMA - CIBERSORT', parentId = CODE$properties$id)
 obj = synStore(obj, activityName = activityName, used = as.character(all.used.ids), executed = thisFile)
 ```
