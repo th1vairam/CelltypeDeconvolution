@@ -1,0 +1,206 @@
+---
+title: Cell type deconvolution of reprocessed RNASeq from AMP-AD (unadjusted - with RFMA signatures using cibersort)
+author: Thanneer Malai Perumal
+date: `r date()`
+output: html_document
+---
+```{r knit2synapse, eval=FALSE, include=FALSE}
+library(synapseClient)
+library(knit2synapse)
+
+synapseLogin()
+
+knit2synapse::knitToFolderEntity(file = "./ampad_repr_unadj_deconvolution_cibersort.Rmd",
+                                 parentId = "syn9890608",
+                                 entityName = "Cell type frctions - AMPAD - with lcpm signatures - using cibersort")
+```
+
+```{r libs, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE, cache=FALSE}
+## It is assumed your working directory is where this file
+
+## Load required libraries
+library(CovariateAnalysis) # get it from devtools::install_github('th1vairam/CovariateAnalysis@dev')
+library(data.table)
+library(tidyr)
+library(plyr)
+library(dplyr)
+
+library(synapseClient)
+library(knitr)
+library(githubr)
+
+library(e1071)
+library(ggplot2)
+
+library(doParallel)
+library(foreach)
+
+cl = makeCluster(detectCores() - 2)
+registerDoParallel(cl)
+
+synapseLogin()
+
+options(xtable.type="html")
+
+knitr::opts_chunk$set(
+  echo=FALSE,
+  warning=FALSE,
+  message=FALSE,
+  error = FALSE,
+  tidy = FALSE,
+  cache = TRUE)
+```
+
+```{r synapse.parameters, include=FALSE, cache=TRUE}
+# Synapse parameters
+parentId = 'syn9890608';
+activityName = 'Celltype deconvolution';
+
+thisFileName <- 'ampad_repr_unadj_deconvolution_cibersort.Rmd'
+
+# Github link
+thisRepo <- getRepo(repository = "th1vairam/CelltypeDeconvolution", ref="branch", refName='deconvolute')
+thisFile <- getPermlink(repository = thisRepo, repositoryPath=thisFileName)
+
+# Number of permutations
+nperm = 10
+```
+### Data download
+Obtain raw reprocessed counts and filtered covariates from synapse
+```{r download.data, cache=TRUE}
+# Get covariates from synapse
+covariates.ids = c(ROSMAP = 'syn8456631',
+                   MSBB = 'syn8484996',
+                   MAYO = 'syn8466814')
+all.used.ids = as.character(covariates.ids)
+covariates = lapply(covariates.ids, downloadFile)
+covariates$ROSMAP = covariates$ROSMAP %>%
+  dplyr::select(SampleID, Diagnosis) %>%
+  dplyr::mutate(BrainRegion = 'DLPFC')
+covariates$MSBB = covariates$MSBB %>%
+  dplyr::select(SampleID, BrainRegion.Diagnosis) %>%
+  tidyr::separate(BrainRegion.Diagnosis, c('BrainRegion', 'Diagnosis'), sep = '\\.')
+covariates$MAYO = covariates$MAYO %>%
+  dplyr::select(SampleID, BrainRegion.Diagnosis) %>%
+  tidyr::separate(BrainRegion.Diagnosis, c('BrainRegion', 'Diagnosis'), sep = '\\.')
+covariates = rbindlist(covariates, use.names = T, fill = T, idcol = 'Study')
+
+# Download sample counts
+counts.id = c(ROSMAP = 'syn8691134',
+              MSBB = 'syn8691099',
+              MAYO1 = 'syn8690799', 
+              MAYO2 = 'syn8690904')
+all.used.ids = c(all.used.ids, as.character(counts.id))
+counts = lapply(counts.id, function(id){
+  tmp = read.table(synGet(id)@filePath, header=T, sep='\t', check.names = F, row.names = 1) %>%
+    rownameToFirstColumn('Gene.ID')
+}) %>%
+  plyr::join_all(type = 'full')
+
+# Filter Samples
+counts = counts[,c('Gene.ID', covariates$SampleID)]
+
+# Convert to logcpm
+lcpm = counts[,-(1)]
+rownames(lcpm) = lcpm$Gene.ID
+lcpm = limma::voom(lcpm[-(1:4),])$E
+rownames(lcpm) = counts$Gene.ID[-(1:4)]
+
+# Get RFMA derived cell type signature gene sets from synapse
+load(synGet('syn11308571')@filePath)
+
+# Get ensembl mapping from synapse
+Gene.ID = data.frame(Gene.ID = counts$Gene.ID,
+                     GeneID = counts$Gene.ID) %>%
+  tidyr::separate(GeneID, c('ensembl_gene_id','position'), sep = '\\.')
+rownames(Gene.ID) = Gene.ID$Gene.ID
+
+rm(list='counts')
+gc()
+```
+### Modified CIBERSORT/ Naive SVM
+```{r cibersort, fig.height=10, fig.width=10, include=FALSE}
+# Modified cibersort algorithm
+modCIBERSORT <- function(X, y, nperm){
+  # Try different values of nu
+  allModels = lapply(c(0.25,0.5,0.75), function(nus){
+    model <- svm(X,y,type="nu-regression",kernel="linear",nu=nus,scale=F)
+    
+    weights = t(model$coefs) %*% model$SV
+    weights[which(weights<0)] = 0
+    w = weights/sum(weights)
+    
+    u <- sweep(X,MARGIN=2,w,'*')
+    k <- apply(u, 1, sum)
+    nusvm <- sqrt((mean((k - y)^2)))
+    corrv <- cor(k, y)
+    
+    return(list(model = model, w = w, k = k, nusvm = nusvm, corrv = corrv))
+  })
+    
+  # Pick best model
+  ind <- which.min(sapply(allModels, function(x){x$nusvm}))
+    
+  # Get and normalize coefficients
+  w <- allModels[[ind]]$w
+  rmse <- allModels[[ind]]$nusvm
+  corr <- allModels[[ind]]$corrv
+    
+  # Do permutation
+  nus = switch(ind, '1' = c(0.25), '2' = c(0.5), '3' = c(0.75))
+  wperm = plyr::ldply(1:nperm, .fun = function(i, X, y, nus){
+    yperm = y[sample(1:dim(y)[1], dim(y)[1]),1,drop=FALSE]
+    rownames(yperm) = rownames(y)
+    model <- svm(X,yperm,type="nu-regression",kernel="linear",nu=nus,scale=F)
+    weights = t(model$coefs) %*% model$SV
+    weights[which(weights<0)] = 0
+    w = weights/sum(weights)
+  }, X, y, nus)
+  
+  # Compute pvals
+  pval = sapply(colnames(wperm), function(colName){
+    sum(wperm[,colName] >= w[1,colName], na.rm = T)/nperm
+  })  
+  names(pval) = paste0(names(pval), '.pval')
+  
+  return(cbind(w,
+               data.frame(t(pval)),
+               data.frame(mix_rmse = rmse), 
+               data.frame(mix_r = corr[1])))
+}
+
+cibersort.estimated.fractions = list(any1 = sig.lcpm.atleast1, any5 = sig.lcpm.atleast5) %>%
+  plyr::ldply(.fun = function(sig.lcpm){
+    # Get marker expression
+    marker.expr = sig.lcpm %>%
+      dplyr::select(celltype, ensembl_gene_id) %>%
+      dplyr::left_join(Gene.ID) %>%
+      plyr::dlply(.(celltype), .fun = function(cellType, expr){
+        apply(expr[cellType$Gene.ID,], 1, mean, na.rm = T) %>%
+          rownameToFirstColumn('Gene.ID') %>%
+          plyr::rename(c('DF' = as.character(unique(cellType$celltype))))
+      }, lcpm) %>%
+      data.table::rbindlist(use.names = T, fill = T) %>%
+      as.data.frame()
+    rownames(marker.expr) = marker.expr$Gene.ID
+    marker.expr$Gene.ID = NULL
+    marker.expr[is.na(marker.expr)] = 0
+    
+    estimated.fractions = plyr::ldply(1:dim(lcpm)[2],
+                                      .fun = function(i, expr, markerExpr, nperm){
+                                        modCIBERSORT(markerExpr, expr[rownames(markerExpr),i,drop=FALSE], nperm)
+                                      }, lcpm, marker.expr, nperm)
+    estimated.fractions$SampleID = colnames(lcpm)
+    
+    return(estimated.fractions)
+  }, .id = 'nBrainRegions')
+```
+### Synapse store
+```{r syn.store, cache=TRUE}
+CODE = Folder(name = 'Cell type fractions - AMPAD - with lcpm signatures - using cibersort', parentId = parentId)
+CODE = synStore(CODE)
+
+write.table(cibersort.estimated.fractions.lcpm, file = 'deconvFracLcpm.tsv', sep = '\t', row.names = F, quote = F)
+obj = File('deconvFracLcpm.tsv', name = 'Deconvoluted Fractions - RFMA - CIBERSORT', parentId = CODE$properties$id)
+obj = synStore(obj, activityName = activityName, used = as.character(all.used.ids), executed = thisFile)
+```
