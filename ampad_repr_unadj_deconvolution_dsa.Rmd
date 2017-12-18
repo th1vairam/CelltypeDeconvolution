@@ -10,9 +10,9 @@ library(knit2synapse)
 
 synapseLogin()
 
-knit2synapse::knitToFolderEntity(file = "./ampad_repr_unadj_deconvolution_RFMA_lcpm.Rmd",
+knit2synapse::knitToFolderEntity(file = "./ampad_repr_unadj_deconvolution_dsa.Rmd",
                                  parentId = "syn9890608",
-                                 entityName = "Cell type frctions - AMPAD - with lcpm signatures")
+                                 entityName = "Cell type fractions - AMPAD - with lcpm signatures - using DSA")
 ```
 
 ```{r libs, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE, cache=FALSE}
@@ -53,7 +53,7 @@ knitr::opts_chunk$set(
   cache = TRUE)
 ```
 
-```{r synapse.parameters, include=FALSE, cache=TRUE}
+```{r synapse.parameters, include=FALSE, cache=FALSE}
 # Synapse parameters
 parentId = 'syn9890608';
 activityName = 'Celltype deconvolution';
@@ -65,7 +65,7 @@ thisRepo <- getRepo(repository = "th1vairam/CelltypeDeconvolution", ref="branch"
 thisFile <- getPermlink(repository = thisRepo, repositoryPath=thisFileName)
 
 # Number of permutations
-nperm = 10
+nperm = 100
 ```
 ### Data download
 Obtain raw reprocessed counts and filtered covariates from synapse
@@ -179,8 +179,8 @@ dsa.estimated.fractions.lcpm = list(any1 = sig.lcpm.atleast1, any5 = sig.lcpm.at
 ```
 
 ### Synapse store
-```{r syn.store, cache=TRUE}
-CODE = Folder(name = 'Cell type frctions - AMPAD - with lcpm signatures', parentId = parentId)
+```{r syn.store, cache=FALSE}
+CODE = Folder(name = 'Cell type fractions - AMPAD - with lcpm signatures - using DSA', parentId = parentId)
 CODE = synStore(CODE)
 
 write.table(dsa.estimated.fractions.lcpm, file = 'deconvFracLcpm.tsv', sep = '\t', row.names = F, quote = F)

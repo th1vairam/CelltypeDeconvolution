@@ -30,7 +30,7 @@ library(knitr)
 library(githubr)
 
 library(ggplot2)
-library(xlsx)
+library(CellMix)
 
 library(doParallel)
 library(foreach)
@@ -58,6 +58,7 @@ knitr::opts_chunk$set(
 # Synapse parameters
 parentId = 'syn9890608';
 activityName = 'Celltype deconvolution';
+nperm = 10;
 
 thisFileName <- 'ampad_repr_unadj_deconvolution.Rmd'
 
@@ -69,130 +70,336 @@ thisFile <- getPermlink(repository = thisRepo, repositoryPath=thisFileName)
 Obtain raw reprocessed counts and filtered covariates from synapse
 ```{r download.data, cache=TRUE}
 # Get covariates from synapse
-covariates.ids = c(ROSMAP = 'syn8456631',
-                   MSBB = 'syn8484996',
-                   MAYO = 'syn8466814')
-all.used.ids = as.character(covariates.ids)
-covariates = lapply(covariates.ids, downloadFile)
-covariates$ROSMAP = covariates$ROSMAP %>%
-  dplyr::select(SampleID, Diagnosis) %>%
-  dplyr::mutate(BrainRegion = 'DLPFC')
-covariates$MSBB = covariates$MSBB %>%
-  dplyr::select(SampleID, BrainRegion.Diagnosis) %>%
-  tidyr::separate(BrainRegion.Diagnosis, c('BrainRegion', 'Diagnosis'), sep = '\\.')
-covariates$MAYO = covariates$MAYO %>%
-  dplyr::select(SampleID, BrainRegion.Diagnosis) %>%
-  tidyr::separate(BrainRegion.Diagnosis, c('BrainRegion', 'Diagnosis'), sep = '\\.')
-covariates = rbindlist(covariates, use.names = T, fill = T, idcol = 'Study')
+covariates = downloadFile('syn10160582')
+covariates$BrainRegion[covariates$BrainRegion == 'CER'] = 'CBE'
+all.used.ids = 'syn10160582'
 
-# Download sample counts
-counts.id = c(ROSMAP = 'syn8691134',
-              MSBB = 'syn8691099',
-              MAYO1 = 'syn8690799', 
-              MAYO2 = 'syn8690904')
-all.used.ids = c(all.used.ids, as.character(counts.id))
-counts = lapply(counts.id, function(id){
-  tmp = read.table(synGet(id)@filePath, header=T, sep='\t', check.names = F, row.names = 1) %>%
-    rownameToFirstColumn('Gene.ID')
-}) %>%
-  plyr::join_all(type = 'full')
-
-# Filter Samples
-counts = counts[,c('Gene.ID', covariates$SampleID)]
-
-# Convert to logcpm
-expr = counts[,-(1)]
-rownames(expr) = counts$Gene.ID
-expr = limma::voom(expr[-(1:4),])$E
+# Download logcpm
+lcpm = downloadFile('syn10160584')
+rownames(lcpm) = lcpm$Gene.ID
+lcpm$Gene.ID = NULL
+all.used.ids = c(all.used.ids, 'syn10160584')
 
 # Get ensembl mapping from synapse
 ENSG2SYM = downloadFile('syn9613401')
 all.used.ids = c(all.used.ids, 'syn9613401')
 
-GeneID2SYM = data.frame(Gene.ID = rownames(expr),
-                        ID = rownames(expr)) %>%
+GeneID2SYM = data.frame(Gene.ID = rownames(lcpm),
+                        ID = rownames(lcpm)) %>%
   tidyr::separate(ID, c('ensembl_gene_id', 'position'), sep = '\\.') %>%
   left_join(ENSG2SYM) %>%
   dplyr::group_by(Gene.ID) %>%
   dplyr::slice(1)
 
-expr = WGCNA::collapseRows(expr, GeneID2SYM$hgnc_symbol, GeneID2SYM$Gene.ID)$datETcollapsed
+expr = WGCNA::collapseRows(lcpm, GeneID2SYM$ensembl_gene_id, GeneID2SYM$Gene.ID)$datETcollapsed
 ```
 
 ### Get gene signatures
 ```{r gene.sig, fig.height=7, fig.width=15}
-# From mariet
-load(synGet('syn9818080')@filePath)
-all.used.ids = c(all.used.ids, 'syn9818080')
+# RFMA signatures from Xue
+file.ids = synQuery('select * from folder where parentId == "syn11297613"') %>%
+  dplyr::filter(folder.name != 'fromReference') %>%
+  plyr::ddply(.(folder.name), .fun = function(x){
+    if(x$folder.name == 'ROSMAP'){
+      synQuery(paste0('select * from file where parentId == "', x$folder.id,'"')) %>%
+        dplyr::filter(file.name == "ROSMAPDLPFCmarker_refined_fromLogCPM.Rdata") %>%
+        dplyr::select(file.name, file.id)
+    } else {
+      synQuery(paste0('select * from folder where parentId == "', x$folder.id,'"')) %>%
+        plyr::ddply(.(folder.name), .fun = function(y){
+          tmp = synQuery(paste0('select * from file where parentId == "', y$folder.id,'"')) %>%
+            dplyr::select(file.name, file.id)
+          tmp = tmp[grep("refined_fromLogCPM.Rdata", tmp$file.name),]
+        })
+    }
+  }) %>%
+  dplyr::select(folder.name, file.id)
+file.ids$folder.name[is.na(file.ids$folder.name)] = 'DLPFC'
 
-gene.markers.mayo = CellTypeList %>%
-      lapply(function(x) data.frame(Symbol = x)) %>%
-      rbindlist(idcol = 'CellType') %>%
-      dplyr::mutate(CellType = gsub('_Zhang_Neuron_2015', '', CellType))
+gene.markers = plyr::dlply(file.ids, .(folder.name), .fun = function(x){
+  load(synGet(x$file.id)@filePath)
+  return(marker.cpm.refined)
+})
+all.used.ids = c(all.used.ids, file.ids$file.id)
 
-# From MSSM group
-gene.markers.mssm = downloadFile('syn10133143') %>%
-  dplyr::rename(Symbol = Gene, CellType = Module) %>%
-  dplyr::mutate(CellType = factor(CellType, labels =  c("ast" = "Astrocyte", "end" = "Endothelial", 
-                                                        "mic" = "Microglia","neu" = "Neuron",
-                                                        "oli" = "Oligodendrocytes", "opc" = "OPC")))
-all.used.ids = c(all.used.ids, 'syn10133143')
-
-gl = rbindlist(list(gene.markers.mayo, gene.markers.mssm), use.names = T, fill = T) %>%
-  unique() %>%
-  dplyr::filter(Symbol %in% rownames(expr))
+writeLines('Number of markers selected by RFMA in each brain region for each cell types are')
+sapply(gene.markers,function(x)sapply(x,length)) %>% 
+  kable()
 ```
 
-### Naive DSA
-```{r dsa.new, fig.height=10, fig.width=10}
-# DSA
-model = DSA(expr, gl[,c('Symbol', 'CellType')])
-w = (t(model$est.weight)/rowSums(t(model$est.weight))) %>%
-  rownameToFirstColumn('SampleID') %>%
-  tidyr::gather(celltype, fraction, -SampleID)
-
-wperm = plyr::llply(1:100, .fun = function(i, X, Gl){
-  X1 = apply(X, 2, function(x){x[sample(1:length(x), length(x))]}) 
-  rownames(X1) = rownames(X)
-  model = DSA(X1, Gl[,c('Symbol', 'CellType')])
-  w = (t(model$est.weight)/rowSums(t(model$est.weight))) %>%
-    rownameToFirstColumn('SampleID') %>%
-    tidyr::gather(celltype, fraction, -SampleID) %>%
-    plyr::rename(c('fraction'=paste0('iter',i)))
-}, expr, gl) %>%
-  join_all(type = "left")
-w$pval = rowSums(wperm[,-(1:2)] >= w[,3])/100
-# w$fraction[w$pval > 0.05] = 0
-w$fdr = p.adjust(w$pval, method='BH')
-
-w = w %>%
-  left_join(covariates)
+### NMF (from cellmix)
+```{r nmf.deconvolve, include = FALSE}
+nmf.prop = plyr::ddply(covariates, .(BrainRegion), .fun = function(covar, express, gMark){
+  print(unique(covar$BrainRegion))
+  # Get marker list
+  mrk = gMark[[unique(covar$BrainRegion)]] %>%
+    lapply(function(x){
+      intersect(x, rownames(express))
+    }) %>%
+    CellMix::MarkerList()
   
-tmp = dplyr::group_by(w, celltype) %>%
-  dplyr::summarise(md = median(fdr)) %>%
-  dplyr::arrange(md)
-w %>% 
-  dplyr::filter(Diagnosis != 'OTHER') %>%
-  dplyr::mutate(celltype = factor(celltype, levels = tmp$celltype)) %>%
-  ggplot(aes(x = celltype, y = fdr, color = Diagnosis)) + geom_boxplot() + theme(axis.text.x = element_text(angle = 45, hjust = 1),legend.position = 'top')
+  # Get expression data
+  X = data.matrix(express[,covar$SampleID])
+  X[X<0] = 0
+  X[is.na(X)] = 0
+  X = X[unlist(mrk),]
+  
+  # Deconvolve actual fractions
+  mdl = CellMix::ged(X, mrk, method = 'deconf')
+  prop = t(coef(mdl)) %>%
+    CovariateAnalysis::rownameToFirstColumn('SampleID') %>%
+    tidyr::gather(CellType, Fraction, -SampleID)
+  
+  # Estimate significance for gene selection
+  prop.rnd1 = plyr::llply(1:nperm, .fun = function(i, express, gMark, covar){
+    # Randomly select genes as signatures
+    glist = gMark[[unique(covar$BrainRegion)]]
+    for (j in 1:length(glist)){
+      if (j == 1){
+        gnames = rownames(express)
+      } else {
+        gnames = setdiff(rownames(express), unlist(glist[1:(j-1)]))
+      }
+      glist[[j]] = gnames[sample(1:length(gnames), length(glist[[j]]))]
+    }
+    glist = glist %>%
+      lapply(function(x){
+        intersect(x, rownames(express))
+      }) 
+    mrk = CellMix::MarkerList(glist)
+    
+    # Get expression data
+    X = data.matrix(express[,covar$SampleID])
+    X[X<0] = 0
+    X[is.na(X)] = 0
+    X = X[unlist(mrk),]
+    X = X[rowSums(X) !=0,]
+    
+    # Deconvolve actual fractions
+    mdl = CellMix::ged(X, mrk, method = 'deconf')
+    prop = t(coef(mdl)) %>%
+      CovariateAnalysis::rownameToFirstColumn('SampleID') %>%
+      tidyr::gather(CellType, Fraction, -SampleID) %>%
+      plyr::rename(c('Fraction' = i))
+  }, express, gMark, covar,
+  .parallel = T, .paropts = list(.packages = c('CellMix', 'CovariateAnalysis', 'plyr', 'tidyr'))) %>%
+    plyr::join_all()
+  
+  prop.rnd1 = prop.rnd1 %>%
+    dplyr::left_join(prop) %>%
+    plyr::ddply(.(SampleID, CellType), .fun = function(x){
+      tt = x %>%
+        dplyr::select(Fraction) %>%
+        unlist
+      
+      ff = x %>%
+        dplyr::select(-SampleID, -CellType, -Fraction) %>%
+        unlist
+      
+      dplyr::select(x, SampleID, CellType, Fraction) %>%
+        dplyr::mutate(pval.t1 = sum(ff >= tt)/length(ff))
+    }, 
+    .parallel = T, .paropts = list(.packages = c('dplyr'))) %>%
+    dplyr::group_by(SampleID) %>%
+    dplyr::mutate(FDR.t1 = p.adjust(pval.t1, method = 'BH')) 
+  
+  # Estimate deconvolution significance
+  prop.rnd2 = plyr::llply(1:nperm, .fun = function(i, express, gMark, covar){
+    # Randomly select genes as signatures
+    mrk = gMark[[unique(covar$BrainRegion)]] %>%
+      lapply(function(x){
+        intersect(x, rownames(express))
+        }) %>%
+      CellMix::MarkerList()
+    
+    # Get expression data
+    X = data.matrix(express[,covar$SampleID]) %>%
+      apply(2, sample)
+    rownames(X) = rownames(express)
+    X[X<0] = 0
+    X[is.na(X)] = 0
+    X = X[unlist(mrk),]
+    X = X[rowSums(X) !=0,]
+    
+    # Deconvolve actual fractions
+    mdl = CellMix::ged(X, mrk, method = 'deconf')
+    prop = t(coef(mdl)) %>%
+      CovariateAnalysis::rownameToFirstColumn('SampleID') %>%
+      tidyr::gather(CellType, Fraction, -SampleID) %>%
+      plyr::rename(c('Fraction' = i))
+  }, express, gMark, covar,
+  .parallel = T, .paropts = list(.packages = c('CellMix', 'CovariateAnalysis', 'plyr', 'tidyr'))) %>%
+    plyr::join_all()
+  
+  prop.rnd2 = prop.rnd2 %>%
+    dplyr::left_join(prop) %>%
+    plyr::ddply(.(SampleID, CellType), .fun = function(x){
+      tt = x %>%
+        dplyr::select(Fraction) %>%
+        unlist
+      
+      ff = x %>%
+        dplyr::select(-SampleID, -CellType, -Fraction) %>%
+        unlist
+      
+      dplyr::select(x, SampleID, CellType, Fraction) %>%
+        dplyr::mutate(pval.t2 = sum(ff >= tt)/length(ff))
+    }, 
+    .parallel = T, .paropts = list(.packages = c('dplyr'))) %>%
+    dplyr::group_by(SampleID) %>%
+    dplyr::mutate(FDR.t2 = p.adjust(pval.t2, method = 'BH')) 
 
-pl = list()
-p = ggplot(w %>%
-             dplyr::filter(Diagnosis != 'OTHER') %>%
-             dplyr::filter(celltype %in% c('Endothelial', 'Neuron', 'Astrocyte')), 
-           aes(x = BrainRegion, y = fraction, color = Diagnosis)) + geom_boxplot() + facet_grid(celltype~., scales = 'free_y')
-p = p + theme(axis.text.x = element_text(angle = 45, hjust = 1),legend.position = 'top')
-p = p + ylab('Estimated Fraction')
-pl[[1]] = p
+  prop = dplyr::full_join(prop.rnd1, prop.rnd2) %>%
+    dplyr::left_join(covar)
+}, expr, gene.markers)
+```
 
-p = ggplot(w %>%
-             dplyr::filter(Diagnosis != 'OTHER') %>%
-             dplyr::filter(celltype %in% c('Microglia', 'Oligodendrocytes', 'OPC')), 
-           aes(x = BrainRegion, y = fraction, color = Diagnosis)) + geom_boxplot() + facet_grid(celltype~., scales = 'free_y')
-p = p + theme(axis.text.x = element_text(angle = 45, hjust = 1),legend.position = 'top')
-p = p + ylab('Estimated Fraction')
-pl[[2]] = p
-multiplot(plotlist = pl, cols = 2)
+```{r nmf.deconvolve1, fig.width=20, fig.height=8}
+p1 = ggplot(nmf.prop, aes(x = BrainRegion, y = Fraction, color = Diagnosis)) + geom_boxplot() + facet_grid(CellType~.)
+p1 = p1 + theme(legend.position = 'top')
+p2 = ggplot(nmf.prop, aes(x = BrainRegion, y = FDR.t1, color = Diagnosis)) + geom_boxplot() + facet_grid(CellType~.)
+p2 = p2 + theme(legend.position = 'top')
+p3 = ggplot(nmf.prop, aes(x = BrainRegion, y = FDR.t2, color = Diagnosis)) + geom_boxplot() + facet_grid(CellType~.)
+p3 = p3 + theme(legend.position = 'top')
+multiplot(plotlist = list(p1,p2,p3), cols = 3)
+```
+
+### DSA (from cellmix)
+```{r dsa.deconvolve, include = FALSE}
+DSA.prop = plyr::ddply(covariates, .(BrainRegion), .fun = function(covar, express, gMark){
+  print(unique(covar$BrainRegion))
+  # Get marker list
+  mrk = gMark[[unique(covar$BrainRegion)]] %>%
+    lapply(function(x){
+      intersect(x, rownames(express))
+    }) %>%
+    CellMix::MarkerList()
+
+  # Get expression data
+  X = data.matrix(express[,covar$SampleID])
+  X[X<0] = 0
+  X[is.na(X)] = 0
+  X = X[rowSums(X) !=0,]
+  
+  # Deconvolve actual fractions
+  mdl = CellMix::ged(X, mrk, method = 'DSA')
+  prop = t(coef(mdl)) %>%
+    CovariateAnalysis::rownameToFirstColumn('SampleID') %>%
+    tidyr::gather(CellType, Fraction, -SampleID)
+  
+  # Estimate gene selection significance
+  prop.rnd1 = plyr::llply(1:nperm, .fun = function(i, express, gMark, covar){
+    # Get expression data
+    X = data.matrix(express[,covar$SampleID])
+    X[X<0] = 0
+    X[is.na(X)] = 0
+    X = X[rowSums(X) !=0,]
+    
+    # Randomly select genes as signatures
+    glist = gMark[[unique(covar$BrainRegion)]]
+    for (j in 1:length(glist)){
+      if (j == 1){
+        gnames = rownames(X)
+      } else{
+        gnames = setdiff(rownames(X), unlist(glist[1:(j-1)]))
+      }
+      glist[[j]] = gnames[sample(1:length(gnames), length(glist[[j]]))]
+    } 
+    mrk = CellMix::MarkerList(glist)
+  
+    # Deconvolve actual fractions
+    mdl = CellMix::ged(X, mrk, method = 'DSA')
+    prop = t(coef(mdl)) %>%
+      CovariateAnalysis::rownameToFirstColumn('SampleID') %>%
+      tidyr::gather(CellType, Fraction, -SampleID) %>%
+      plyr::rename(c('Fraction'=i))
+  }, express, gMark, covar,
+  .parallel = T, .paropts = list(.packages = c('CellMix', 'CovariateAnalysis', 'plyr', 'tidyr'))) %>%
+    plyr::join_all() 
+  
+  prop.rnd1 = prop.rnd1 %>%
+    dplyr::left_join(prop) %>%
+    plyr::ddply(.(SampleID, CellType), .fun = function(x){
+      tt = x %>%
+        dplyr::select(Fraction) %>%
+        unlist
+      
+      ff = x %>%
+        dplyr::select(-SampleID, -CellType, -Fraction) %>%
+        unlist
+      
+      dplyr::select(x, SampleID, CellType, Fraction) %>%
+        dplyr::mutate(pval.t1 = sum(ff >= tt)/length(ff))
+    }, 
+    .parallel = T, .paropts = list(.packages = c('dplyr'))) %>%
+    dplyr::group_by(SampleID) %>%
+    dplyr::mutate(FDR.t1 = p.adjust(pval.t1, method = 'BH')) 
+  
+  # Estimate sample estimation significance
+  prop.rnd2 = plyr::llply(1:nperm, .fun = function(i, express, gMark, covar){
+    # Get expression data
+    X = data.matrix(express[,covar$SampleID]) %>%
+      apply(2, function(y){ sample(y) })
+    rownames(X) = rownames(express)
+    X[X<0] = 0
+    X[is.na(X)] = 0
+    X = X[rowSums(X) !=0,]
+  
+    # Randomly select genes as signatures
+    mrk = CellMix::MarkerList(gMark[[unique(covar$BrainRegion)]])
+  
+    # Deconvolve actual fractions
+    mdl = CellMix::ged(X, mrk, method = 'DSA')
+    prop = t(coef(mdl)) %>%
+      CovariateAnalysis::rownameToFirstColumn('SampleID') %>%
+      tidyr::gather(CellType, Fraction, -SampleID) %>%
+      plyr::rename(c('Fraction'=i))
+  }, express, gMark, covar,
+  .parallel = T, .paropts = list(.packages = c('CellMix', 'CovariateAnalysis', 'plyr', 'tidyr'))) %>%
+    plyr::join_all() 
+  
+  prop.rnd2 = prop.rnd2 %>%
+    dplyr::left_join(prop) %>%
+    plyr::ddply(.(SampleID, CellType), .fun = function(x){
+      tt = x %>%
+        dplyr::select(Fraction) %>%
+        unlist
+      
+      ff = x %>%
+        dplyr::select(-SampleID, -CellType, -Fraction) %>%
+        unlist
+      
+      dplyr::select(x, SampleID, CellType, Fraction) %>%
+        dplyr::mutate(pval.t2 = sum(ff >= tt)/length(ff))
+    }, 
+    .parallel = T, .paropts = list(.packages = c('dplyr'))) %>%
+    dplyr::group_by(SampleID) %>%
+    dplyr::mutate(FDR.t2 = p.adjust(pval.t2, method = 'BH')) 
+  
+  prop = dplyr::full_join(prop.rnd1, prop.rnd2) %>%
+    dplyr::left_join(covar)
+}, expr, gene.markers)
+```
+```{r dsa.convolve1, fig.width=16, fig.height=8}
+p4 = ggplot(DSA.prop, aes(x = BrainRegion, y = Fraction, color = Diagnosis)) + geom_boxplot() + facet_grid(CellType~.)
+p4 = p4 + theme(legend.position = 'top')
+p5 = ggplot(DSA.prop, aes(x = BrainRegion, y = FDR.t1, color = Diagnosis)) + geom_boxplot() + facet_grid(CellType~.)
+p5 = p5 + theme(legend.position = 'top')
+p6 = ggplot(DSA.prop, aes(x = BrainRegion, y = FDR.t2, color = Diagnosis)) + geom_boxplot() + facet_grid(CellType~.)
+p6 = p6 + theme(legend.position = 'top')
+multiplot(plotlist = list(p4,p5,p6), cols = 3)
+```
+
+```{r}
+tmp = nmf.prop %>% 
+  dplyr::select(SampleID, CellType, Fraction, BrainRegion) %>% 
+  dplyr::rename(nmf = Fraction) %>% 
+  dplyr::left_join(
+    DSA.prop %>% 
+      dplyr::select(SampleID, CellType, Fraction, BrainRegion) %>% 
+      dplyr::rename(dsa = Fraction)
+    )
+ggplot(tmp1, aes(x = nmf, y = dsa, color = CellType)) + geom_point() + theme(legend.position = 'top') + facet_grid(.~BrainRegion)
 ```
 
 ### Synapse store
@@ -200,7 +407,7 @@ multiplot(plotlist = pl, cols = 2)
 CODE = Folder(name = 'AMPAD Reprocessed RNASeq', parentId = parentId)
 CODE = synStore(CODE)
 
-save(list = c('w'), file = 'AllResults.RData')
+save(list = c('nmf.prop','DSA.prop'), file = 'AllResults.RData')
 obj = File('AllResults.RData', name = 'All Fractions', parentId = CODE$properties$id)
 obj = synStore(obj, activityName = activityName, used = as.character(all.used.ids), executed = thisFile)
 ```
