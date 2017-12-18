@@ -40,9 +40,6 @@ registerDoParallel(cl)
 
 synapseLogin()
 
-# Source external files
-source('./DSA.R')
-
 options(xtable.type="html")
 
 knitr::opts_chunk$set(
@@ -58,7 +55,7 @@ knitr::opts_chunk$set(
 # Synapse parameters
 parentId = 'syn9890608';
 activityName = 'Celltype deconvolution';
-nperm = 10;
+nperm = 100;
 
 thisFileName <- 'ampad_repr_unadj_deconvolution.Rmd'
 
@@ -399,7 +396,7 @@ tmp = nmf.prop %>%
       dplyr::select(SampleID, CellType, Fraction, BrainRegion) %>% 
       dplyr::rename(dsa = Fraction)
     )
-ggplot(tmp1, aes(x = nmf, y = dsa, color = CellType)) + geom_point() + theme(legend.position = 'top') + facet_grid(.~BrainRegion)
+ggplot(tmp, aes(x = nmf, y = dsa, color = CellType)) + geom_point() + theme(legend.position = 'top') + facet_grid(.~BrainRegion)
 ```
 
 ### Synapse store
